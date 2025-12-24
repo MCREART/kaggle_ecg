@@ -12,6 +12,21 @@ if [ ! -d "ori_csv" ]; then
     gsutil -m cp -r gs://tpu-research-01-ecg-data/kaggle_ecg/ori_csv .
 fi
 
+# 1.5 解压 CSV 数据 (如果是压缩包)
+if [ -f "ori_csv/train-csvs.tar.gz" ] && [ ! -d "ori_csv/train" ]; then
+    echo "正在解压 CSV 数据..."
+    mkdir -p ori_csv/train_tmp
+    tar -xzf ori_csv/train-csvs.tar.gz -C ori_csv/train_tmp
+    # 自动识别解压后的子目录并移动
+    CHILD_DIR=$(find ori_csv/train_tmp -maxdepth 1 -type d | grep -v "train_tmp$" | head -n 1)
+    if [ -n "$CHILD_DIR" ]; then
+        mv "$CHILD_DIR" ori_csv/train
+    else
+        mv ori_csv/train_tmp ori_csv/train
+    fi
+    rm -rf ori_csv/train_tmp
+fi
+
 # 2. 生成标准网格数据集
 echo "正在生成 dataset_grid (标准)..."
 python scripts/build_dataset.py \
@@ -41,7 +56,7 @@ if [ ! -d "gen_wave" ]; then
     fi
     
     python scripts/batch_render_waveforms.py \
-        --csv-root ori_csv \
+        --csv-root ori_csv/train \
         --grid "$GRID_IMG" \
         --output-dir gen_wave \
         --overwrite

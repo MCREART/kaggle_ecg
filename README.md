@@ -4,20 +4,18 @@
 
 在新的 TPU VM 机器上，请按照以下步骤快速恢复环境并开始训练。
 
-### 1. 环境安装
-
-首先安装 PyTorch XLA (TPU 支持) 和项目依赖：
+### 1. 环境安装 (TPU v6e 特别说明)
+由于 TPU v6e 较新，建议使用以下命令安装最新支持的驱动和运行时：
 
 ```bash
-# 1. 安装 PyTorch XLA (适配 TPU)
-pip install torch~=2.3.0 torch_xla[tpu]~=2.3.0 -f https://storage.googleapis.com/libtpu-releases/index.html
+# 1. 安装 PyTorch 2.5 和适配 v6e 的 libtpu
+pip install torch~=2.5.0 torch_xla[tpu]~=2.5.0 -f https://storage.googleapis.com/libtpu-releases/index.html
+pip install torchvision==0.20.0
+pip install -r requirements.txt
 
 # 2. 修复 PATH (如果你还没做过)
 echo 'export PATH=$PATH:$HOME/.local/bin' >> ~/.bashrc
 source ~/.bashrc
-
-# 3. 安装项目依赖
-pip install -r requirements.txt
 ```
 
 ### 2. 数据准备
@@ -37,13 +35,27 @@ bash scripts/prepare_all_data.sh
 
 ### 3. 开始训练
 
-使用适配 TPU 的训练脚本 `experiment/train_tpu.py`。建议开启 BF16 以获得最佳性能。
+使用适配 TPU 的训练脚本 `experiment/train_tpu.py`。
+**注意：** 必须设置 `TPU_LIBRARY_PATH` 和 `PJRT_DEVICE` 环境变量，否则可能会报错 `libtpu not found` 或回退到 CPU。
 
 ```bash
-# 开启 BF16 并开始训练
-export XLA_USE_BF16=1
+# 核心环境变量配置
+export TPU_LIBRARY_PATH=$HOME/.local/lib/python3.10/site-packages/libtpu/libtpu.so
+export PJRT_DEVICE=TPU
+
+# 推荐：使用 FP32 训练 (更稳定，防止 Loss NaN)
+export XLA_USE_BF16=0 
+
+# 如果追求极速，可尝试开启 BF16（需确保学习率够小）
+# export XLA_USE_BF16=1
+
 python experiment/train_tpu.py --config experiment/configs/grid_aug_net.yaml
 ```
+
+#### 常见报错与解决
+*   **Running on CPU (TfrtCpuClient created)**: 说明没有设置 `PJRT_DEVICE=TPU` 或驱动未找到。请检查 `TPU_LIBRARY_PATH` 是否指向了正确的 `libtpu.so`。
+*   **Loss NaN**: 通常是因为学习率过大或者开启了 BF16 导致的数值溢出。建议设置 `XLA_USE_BF16=0` 并降低学习率。
+*   **libpng error: Read Error**: 训练数据损坏。建议删除 `dataset_grid` 目录并使用 `scripts/build_dataset.py` 重新生成。
 
 ---
 

@@ -80,15 +80,38 @@ class GridMaskDataset(Dataset):
         return len(self.items)
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
-        item = self.items[index]
-        image = _load_image(item.image_path)
-        mask = _load_mask(item.mask_path)
+        # 简单的重试机制：如果当前样本坏了，就试下一个
+        try:
+            item = self.items[index]
+            image = _load_image(item.image_path)
+            mask = _load_mask(item.mask_path)
+        except Exception as e:
+            # 随机换一个索引重试 (避免死循环，最多试5次)
+            print(f"Warning: Failed to load {self.items[index].image_path}: {e}. Retrying...")
+            for _ in range(5):
+                try:
+                    alt_idx = np.random.randint(len(self.items))
+                    item = self.items[alt_idx]
+                    image = _load_image(item.image_path)
+                    mask = _load_mask(item.mask_path)
+                    break
+                except Exception:
+                    continue
+            else:
+                # 实在不行就抛异常
+                raise e
 
         if self.augment:
             image, mask = _random_augment(image, mask)
 
         image = image.astype(np.float32) / 255.0
-        image = (image - self.normalize_mean) / self.normalize_std
+        # 增加 epsilon 防止除 0
+        image = (image - self.normalize_mean) / (self.normalize_std + 1e-6)
+        
+        # 检查 NaN
+        if np.isnan(image).any():
+             image = np.nan_to_num(image)
+             
         image = torch.from_numpy(image.transpose(2, 0, 1))
 
         if self.num_classes == 1:

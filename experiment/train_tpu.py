@@ -98,6 +98,7 @@ class ModelConfig:
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="训练网格分割模型 (TPU)")
     parser.add_argument("--config", type=Path, required=True, help="YAML 配置文件路径")
+    parser.add_argument("--nprocs", type=int, default=None, help="Number of TPU cores to use")
     return parser.parse_args(argv)
 
 
@@ -573,8 +574,26 @@ def run_training_process(rank: int, args: argparse.Namespace) -> None:
 
 def main():
     args = parse_args()
-    # 启动多进程训练 (默认利用所有 TPU 核心)
-    xmp.spawn(run_training_process, args=(args,), start_method='fork')
+    
+    # Debug info
+    import torch_xla.core.xla_model as xm
+    print(f"DEBUG: PJRT_DEVICE={os.environ.get('PJRT_DEVICE')}")
+    print(f"DEBUG: TPU_LIBRARY_PATH={os.environ.get('TPU_LIBRARY_PATH')}")
+    
+    try:
+        world_size = xm.xrt_world_size()
+        print(f"DEBUG: Detected world size: {world_size}")
+    except Exception as e:
+        print(f"DEBUG: Error getting world size: {e}")
+        world_size = 0
+
+    nprocs = args.nprocs or world_size
+    if nprocs <= 0:
+        print("警告: 未检测到可用核心，尝试强制设置为 1 (或使用 --nprocs 强制设置)")
+        nprocs = 1
+
+    print(f"启动 {nprocs} 个进程进行训练...")
+    xmp.spawn(run_training_process, nprocs=nprocs, args=(args,), start_method='fork')
 
 
 if __name__ == "__main__":

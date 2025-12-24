@@ -3,3 +3,6 @@ pyyaml
 tqdm
 pandas
 scikit-learn
+Pillow
+segmentation-models-pytorch
+timm

@@ -576,26 +576,14 @@ def main():
     args = parse_args()
     
     # Debug info
-    import torch_xla.core.xla_model as xm
     print(f"DEBUG: PJRT_DEVICE={os.environ.get('PJRT_DEVICE')}")
     print(f"DEBUG: TPU_LIBRARY_PATH={os.environ.get('TPU_LIBRARY_PATH')}")
     
-    try:
-        # 在单机 TPU VM 环境下，xrt_world_size() 在 spawn 前可能返回 1
-        # 但我们知道 v6e 通常有 4 个芯片
-        world_size = xm.xrt_world_size() 
-        print(f"DEBUG: Detected world size initially: {world_size}")
-        if world_size == 1:
-             print("DEBUG: Auto-adjusting default nprocs to 4 for TPU VM")
-             world_size = 4
-    except Exception as e:
-        print(f"DEBUG: Error getting world size: {e}")
-        world_size = 4 # Default fallback
-
-    nprocs = args.nprocs or world_size
-    if nprocs <= 0:
-        print("警告: 未检测到可用核心，尝试强制设置为 1 (或使用 --nprocs 强制设置)")
-        nprocs = 1
+    # 注意：在调用 xmp.spawn 之前，绝对不能调用任何 torch_xla 的 API
+    # 否则 Runtime 会被初始化为单进程模式，导致后续 spawn 失败。
+    # 对于 TPU VM v6e，我们默认强制使用 4 核心。
+    
+    nprocs = args.nprocs or 4
 
     print(f"启动 {nprocs} 个进程进行训练...")
     xmp.spawn(run_training_process, nprocs=nprocs, args=(args,), start_method='fork')

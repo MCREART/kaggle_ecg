@@ -16,6 +16,8 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
+import subprocess
+import shlex
 
 import numpy as np
 import torch
@@ -99,6 +101,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="训练网格分割模型 (TPU)")
     parser.add_argument("--config", type=Path, required=True, help="YAML 配置文件路径")
     parser.add_argument("--nprocs", type=int, default=None, help="Number of TPU cores to use")
+    parser.add_argument("--gcs-dir", type=str, default=None, help="GCS bucket path to sync checkpoints to")
     return parser.parse_args(argv)
 
 
@@ -376,6 +379,7 @@ def save_checkpoint(
     epoch: int,
     metrics: dict[str, float],
     model_config: ModelConfig,
+    gcs_dir: str | None = None,
 ) -> None:
     # 仅在 Master 节点保存
     if not xm.is_master_ordinal():
@@ -390,7 +394,18 @@ def save_checkpoint(
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     # 使用 xm.save 确保正确保存（它在 CPU 上保存）
+    # 使用 xm.save 确保正确保存（它在 CPU 上保存）
     xm.save(state, str(path))
+    
+    # 异步上传到 GCS
+    if gcs_dir:
+        try:
+            remote_path = f"{gcs_dir.rstrip('/')}/{path.name}"
+            # 使用 Popen 进行后台上传，不阻塞训练
+            subprocess.Popen(["gsutil", "cp", str(path), remote_path])
+            print(f"Uploading {path.name} to {remote_path} in background...")
+        except Exception as e:
+            print(f"Warning: Failed to trigger GCS upload: {e}")
 
 
 def prepare_dataloaders(
@@ -573,9 +588,12 @@ def run_training_process(rank: int, args: argparse.Namespace) -> None:
                     model_config=model_cfg,
                 )
 
-        if xm.is_master_ordinal():
              with (model_dir / "history.json").open("w", encoding="utf-8") as f:
                 json.dump(history, f, ensure_ascii=False, indent=2)
+             
+             # Sync history to GCS as well
+             if args.gcs_dir:
+                 subprocess.Popen(["gsutil", "cp", str(model_dir / "history.json"), f"{args.gcs_dir.rstrip('/')}/history.json"])
 
 
 def main():

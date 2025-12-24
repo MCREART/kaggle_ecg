@@ -10,7 +10,7 @@ data:
     - ../../dataset_wave_only
   val_split: 0.1
   batch_size: 32
-  num_workers: 4
+  num_workers: 32
   augment: true
   in_channels: 3
   classes: 1

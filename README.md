@@ -18,6 +18,20 @@ echo 'export PATH=$PATH:$HOME/.local/bin' >> ~/.bashrc
 source ~/.bashrc
 ```
 
+### 1.1 TPU 状态监控
+由于驱动版本冲突，如果需要使用 `tpu-info` 查看芯片状态，必须安装 **0.3.0** 旧版本，并指定驱动路径：
+
+```bash
+# 1. 安装兼容版本
+pip install --no-deps tpu-info==0.3.0
+
+# 2. 从另一个终端窗口查看状态
+export TPU_LIBRARY_PATH=$HOME/.local/lib/python3.10/site-packages/libtpu/libtpu.so
+tpu-info
+# 或者实时监控
+watch -n 1 tpu-info
+```
+
 ### 2. 数据准备
 
 使用 `scripts/prepare_all_data.sh` 脚本可以自动完成以下工作：

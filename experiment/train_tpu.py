@@ -581,11 +581,16 @@ def main():
     print(f"DEBUG: TPU_LIBRARY_PATH={os.environ.get('TPU_LIBRARY_PATH')}")
     
     try:
-        world_size = xm.xrt_world_size()
-        print(f"DEBUG: Detected world size: {world_size}")
+        # 在单机 TPU VM 环境下，xrt_world_size() 在 spawn 前可能返回 1
+        # 但我们知道 v6e 通常有 4 个芯片
+        world_size = xm.xrt_world_size() 
+        print(f"DEBUG: Detected world size initially: {world_size}")
+        if world_size == 1:
+             print("DEBUG: Auto-adjusting default nprocs to 4 for TPU VM")
+             world_size = 4
     except Exception as e:
         print(f"DEBUG: Error getting world size: {e}")
-        world_size = 0
+        world_size = 4 # Default fallback
 
     nprocs = args.nprocs or world_size
     if nprocs <= 0:

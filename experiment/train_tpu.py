@@ -325,6 +325,7 @@ def evaluate(
     num_classes: int,
 ) -> dict[str, float]:
     model.eval()
+    t_start = time.time()
     total_loss = 0.0
     total_dice = 0.0
     batches = 0
@@ -356,7 +357,12 @@ def evaluate(
     final_loss = reduced[0].item() / max(reduced[2].item(), 1)
     final_dice = reduced[1].item() / max(reduced[2].item(), 1)
 
-    metrics = {"val_loss": final_loss}
+    metric_str = f"val_time: {time.time() - t_start:.2f}s"
+    # 仅 master 打印时间，避免刷屏 (虽然 logging 在外层)
+    if xm.is_master_ordinal():
+         pass 
+
+    metrics = {"val_loss": final_loss, "val_time": time.time() - t_start}
     if num_classes == 1:
         metrics["val_dice"] = final_dice
     return metrics
@@ -460,7 +466,7 @@ def prepare_dataloaders(
         batch_size=data_cfg.batch_size,
         sampler=val_sampler,
         num_workers=data_cfg.num_workers,
-        drop_last=False,
+        drop_last=True,
     )
     
     return train_loader, val_loader

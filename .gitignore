@@ -36,3 +36,5 @@ ecg_generator_with_train_src/train/
 
 # Archives
 *.tar.gz
+ori_csv/
+empty_placeholder/

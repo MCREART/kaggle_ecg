@@ -1,3 +1,52 @@
+# Kaggle ECG 数据生成与训练指南
+
+## TPU 环境配置与训练指南 (Google Cloud TPU VM)
+
+在新的 TPU VM 机器上，请按照以下步骤快速恢复环境并开始训练。
+
+### 1. 环境安装
+
+首先安装 PyTorch XLA (TPU 支持) 和项目依赖：
+
+```bash
+# 1. 安装 PyTorch XLA (适配 TPU)
+pip install torch~=2.3.0 torch_xla[tpu]~=2.3.0 -f https://storage.googleapis.com/libtpu-releases/index.html
+
+# 2. 修复 PATH (如果你还没做过)
+echo 'export PATH=$PATH:$HOME/.local/bin' >> ~/.bashrc
+source ~/.bashrc
+
+# 3. 安装项目依赖
+pip install -r requirements.txt
+```
+
+### 2. 数据准备
+
+使用 `scripts/prepare_all_data.sh` 脚本可以自动完成以下工作：
+1. 从 GCS 下载原始数据 (`ori_data`, `ori_csv`)。
+2. 生成标准网格数据集 (`dataset_grid`).
+3. 生成增强数据集 (`dataset_grid_moire_blur_required`).
+4. 生成纯波形数据集 (`dataset_wave_only`).
+
+```bash
+# 一键准备所有数据
+bash scripts/prepare_all_data.sh
+```
+
+*(如果只需下载原始数据，可手动运行 `gsutil -m cp -r gs://tpu-research-01-ecg-data/kaggle_ecg/ori_data .` 和 `gsutil -m cp -r gs://tpu-research-01-ecg-data/kaggle_ecg/ori_csv .`)*
+
+### 3. 开始训练
+
+使用适配 TPU 的训练脚本 `experiment/train_tpu.py`。建议开启 BF16 以获得最佳性能。
+
+```bash
+# 开启 BF16 并开始训练
+export XLA_USE_BF16=1
+python experiment/train_tpu.py --config experiment/configs/grid_aug_net.yaml
+```
+
+---
+
 # Kaggle ECG 数据生成辅助说明
 
 ## 批量生成波形整页与掩模

@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.python-version
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# OS / Editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Training outputs / logs
+runs/
+model_outputs*/
+
+# Generated datasets / large artifacts
+dataset_*/
+gen_dataset*/
+gen_wave/
+wave_mix_source/
+data_to_process*/
+ori_data/
+demo/
+
+# ECG waveform training CSV dumps (large)
+ecg_generator_with_train_src/train/
+
+# Archives
+*.tar.gz

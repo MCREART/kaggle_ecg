@@ -1,0 +1,517 @@
+#!/usr/bin/env python3
+"""
+专门针对波形整页（生成数据）的批量裁剪脚本。
+
+输入：
+  --image-root  指向包含整页波形 PNG 的目录（递归搜索）。
+  --mask-root   指向对应的波形掩码 PNG（文件名需为 <stem>_mask.png）。
+  --grid-mask   训练用的网格掩码（与 build_dataset.py 相同）。
+
+输出：
+  target_root/
+    images/<sample>.png
+    masks/<sample>_mask.png
+"""
+
+from __future__ import annotations
+
+import argparse
+import multiprocessing as mp
+import os
+import random
+import shutil
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Iterable, List, Sequence
+
+import numpy as np
+from PIL import Image
+from tqdm.auto import tqdm
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from crop_generator import (  # noqa: E402
+    BlurParams,
+    CropParams,
+    GrayParams,
+    MoireParams,
+    NegativeSampleParams,
+    NoiseParams,
+    OcclusionParams,
+    StainParams,
+    TransformParams,
+    WrinkleParams,
+    generate_transformed_crops,
+    synthesize_negative_image,
+)
+from crop_generator.random_params import (  # noqa: E402
+    ensure_any_module,
+    random_blur,
+    random_gray,
+    random_moire,
+    random_noise,
+    random_occlusion,
+    random_stain,
+    random_transform,
+    random_wrinkle,
+)
+
+
+@dataclass(frozen=True)
+class Job:
+    index: int
+    image_path: Path
+    mask_path: Path
+    coverage_mask_path: Path
+
+
+@dataclass(frozen=True)
+class WorkerConfig:
+    samples_per_image: int
+    negative_per_image: int
+    allow_out_of_bounds_prob: float
+    crop_min_size: int
+    crop_max_size: int
+    crop_out_size: int
+    min_mask_coverage: float
+    coverage_dilation_kernel: int
+    coverage_max_attempts: int
+    mask_guided_prob: float
+    mask_guided_expand_ratio: float
+    mask_guided_jitter_ratio: float
+    mask_guided_min_area_ratio: float
+    negative_params: NegativeSampleParams
+    output_images: Path
+    output_masks: Path
+    tmp_root: Path
+    overwrite: bool
+    seed_base: int
+    enable_wrinkle: bool
+    enable_blur: bool
+    force_blur: bool
+    enable_noise: bool
+    enable_occlusion: bool
+    enable_stain: bool
+    enable_moire: bool
+    enable_gray: bool
+    force_moire: bool
+    ensure_active_module: bool
+
+
+_WORKER_CONFIG: WorkerConfig | None = None
+
+
+def _init_worker(config: WorkerConfig) -> None:
+    global _WORKER_CONFIG
+    _WORKER_CONFIG = config
+    config.tmp_root.mkdir(parents=True, exist_ok=True)
+
+
+def _iter_images(root: Path) -> Iterable[Path]:
+    for path in sorted(root.rglob("*.png")):
+        if path.is_file() and not path.stem.endswith("_mask"):
+            yield path
+
+
+def _build_mask_lookup(mask_root: Path, suffix: str) -> Dict[str, Path]:
+    lookup: Dict[str, Path] = {}
+    for path in mask_root.rglob("*.png"):
+        if not path.is_file():
+            continue
+        stem = path.stem
+        if not stem.endswith(suffix):
+            continue
+        key = stem[: -len(suffix)]
+        lookup[key] = path
+    return lookup
+
+
+def _choose_modules(
+    rng: random.Random,
+    config: WorkerConfig,
+) -> tuple[TransformParams, WrinkleParams, BlurParams, NoiseParams, OcclusionParams, StainParams, MoireParams, GrayParams]:
+    transform = random_transform(rng)
+    modules = []
+
+    if config.enable_wrinkle:
+        wrinkle = random_wrinkle(rng)
+    else:
+        wrinkle = WrinkleParams(enabled=False)
+    modules.append(wrinkle)
+
+    if config.enable_blur:
+        blur = random_blur(rng, force=config.force_blur)
+    else:
+        blur = BlurParams(enabled=False)
+    modules.append(blur)
+
+    if config.enable_noise:
+        noise = random_noise(rng)
+    else:
+        noise = NoiseParams(enabled=False)
+    modules.append(noise)
+
+    if config.enable_occlusion:
+        occlusion = random_occlusion(rng)
+    else:
+        occlusion = OcclusionParams(enabled=False)
+    modules.append(occlusion)
+
+    if config.enable_stain:
+        stain = random_stain(rng)
+    else:
+        stain = StainParams(enabled=False)
+    modules.append(stain)
+
+    if config.enable_moire:
+        moire = random_moire(rng, force=config.force_moire)
+    else:
+        moire = MoireParams(enabled=False)
+    modules.append(moire)
+
+    if config.enable_gray:
+        gray = random_gray(rng)
+    else:
+        gray = GrayParams(enabled=False)
+    modules.append(gray)
+
+    if config.ensure_active_module:
+        ensure_any_module(modules, rng)
+
+    wrinkle, blur, noise, occlusion, stain, moire, gray = modules[0], modules[1], modules[2], modules[3], modules[4], modules[5], modules[6]
+    return transform, wrinkle, blur, noise, occlusion, stain, moire, gray
+
+
+def _save_positive_sample(
+    job: Job,
+    sample_idx: int,
+    transform: TransformParams,
+    wrinkle: WrinkleParams,
+    blur: BlurParams,
+    noise: NoiseParams,
+    occlusion: OcclusionParams,
+    stain: StainParams,
+    moire: MoireParams,
+    gray: GrayParams,
+    rng: random.Random,
+) -> None:
+    assert _WORKER_CONFIG is not None
+    config = _WORKER_CONFIG
+
+    stem = f"{job.image_path.stem}_p{sample_idx:02d}"
+    final_image_path = config.output_images / f"{stem}.png"
+    final_mask_path = config.output_masks / f"{stem}_mask.png"
+    if not config.overwrite and (final_image_path.exists() or final_mask_path.exists()):
+        raise FileExistsError(f"{stem} 已存在，请使用 --overwrite 或清理输出目录。")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="cg_", dir=config.tmp_root))
+    try:
+        corner_candidates = (
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        )
+        corner_override = corner_candidates[sample_idx] if sample_idx < len(corner_candidates) else None
+        allow_oob = rng.random() < config.allow_out_of_bounds_prob if corner_override is None else False
+
+        crop_params = CropParams(
+            count=1,
+            min_size=config.crop_min_size,
+            max_size=config.crop_max_size,
+            out_size=config.crop_out_size,
+            allow_out_of_bounds=allow_oob,
+            corner_override=corner_override,
+            corner_focus_prob=0.0,
+            min_mask_coverage=config.min_mask_coverage,
+            coverage_dilation_kernel=config.coverage_dilation_kernel,
+            coverage_max_attempts=config.coverage_max_attempts,
+            min_horizontal_density=0.0,
+            min_horizontal_rows=0,
+            mask_guided_prob=config.mask_guided_prob,
+            mask_guided_expand_ratio=config.mask_guided_expand_ratio,
+            mask_guided_jitter_ratio=config.mask_guided_jitter_ratio,
+            mask_guided_min_area_ratio=config.mask_guided_min_area_ratio,
+        )
+
+        generate_transformed_crops(
+            image_path=job.image_path,
+            mask_path=job.mask_path,
+            coverage_mask_path=job.coverage_mask_path,
+            output_dir=tmp_dir,
+            transform=transform,
+            crop=crop_params,
+            wrinkle=wrinkle,
+            blur=blur,
+            gray=gray,
+            noise=noise,
+            occlusion=occlusion,
+            stain=stain,
+            moire=moire,
+            seed=rng.randrange(0, 2**31),
+        )
+        src_image = tmp_dir / "crop_00_img.png"
+        src_mask = tmp_dir / "crop_00_mask.png"
+        if not src_image.exists() or not src_mask.exists():
+            raise FileNotFoundError(f"生成失败：{src_image} 或 {src_mask} 不存在")
+        config.output_images.mkdir(parents=True, exist_ok=True)
+        config.output_masks.mkdir(parents=True, exist_ok=True)
+        shutil.move(src=str(src_image), dst=final_image_path)
+        shutil.move(src=str(src_mask), dst=final_mask_path)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _save_negative_sample(job: Job, neg_idx: int, rng: random.Random) -> None:
+    assert _WORKER_CONFIG is not None
+    config = _WORKER_CONFIG
+    params = config.negative_params
+    stem = f"{job.image_path.stem}_n{neg_idx:02d}"
+    final_image_path = config.output_images / f"{stem}.png"
+    final_mask_path = config.output_masks / f"{stem}_mask.png"
+    if not config.overwrite and (final_image_path.exists() or final_mask_path.exists()):
+        raise FileExistsError(f"{stem} 已存在，请使用 --overwrite 或清理输出目录。")
+
+    image = synthesize_negative_image(params, rng)
+    mask = np.zeros((params.image_size, params.image_size), dtype=np.uint8)
+
+    config.output_images.mkdir(parents=True, exist_ok=True)
+    config.output_masks.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(image).save(final_image_path)
+    Image.fromarray(mask).save(final_mask_path)
+
+
+def _process_job(job: Job) -> tuple[Path, int, int]:
+    assert _WORKER_CONFIG is not None
+    config = _WORKER_CONFIG
+    rng = random.Random(config.seed_base + job.index)
+
+    positive = 0
+    try:
+        for idx in range(config.samples_per_image):
+            transform, wrinkle, blur, noise, occlusion, stain, moire, gray = _choose_modules(rng, config)
+            _save_positive_sample(
+                job,
+                idx,
+                transform,
+                wrinkle,
+                blur,
+                noise,
+                occlusion,
+                stain,
+                moire,
+                gray,
+                rng,
+            )
+            positive += 1
+    except Exception as exc:
+        raise RuntimeError(f"{job.image_path} 正样本生成失败：{exc}") from exc
+
+    negative = 0
+    for idx in range(config.negative_per_image):
+        _save_negative_sample(job, idx, rng)
+        negative += 1
+    return job.image_path, positive, negative
+
+
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--image-root", type=Path, default=Path("gen_wave/images"), help="波形整页图片目录。")
+    parser.add_argument("--mask-root", type=Path, default=Path("gen_wave/masks"), help="对应波形掩码目录。")
+    parser.add_argument("--mask-suffix", type=str, default="_mask", help="掩码文件名后缀（默认 _mask）。")
+    parser.add_argument("--grid-mask", type=Path, default=Path("image_data/complete_mask.png"), help="训练用网格掩码。")
+    parser.add_argument("--output-root", type=Path, default=Path("dataset_wave_only"), help="输出数据集根目录。")
+    parser.add_argument("--samples-per-image", type=int, default=10, help="每张整页生成的正样本数量。")
+    parser.add_argument("--negative-per-image", type=int, default=0, help="每张整页额外生成的负样本数量。")
+    parser.add_argument("--allow-out-of-bounds-prob", type=float, default=0.3, help="裁剪允许越界的概率。")
+    parser.add_argument("--crop-min", type=int, default=256, help="随机裁剪下限。")
+    parser.add_argument("--crop-max", type=int, default=768, help="随机裁剪上限。")
+    parser.add_argument("--crop-out", type=int, default=512, help="输出分辨率。")
+    parser.add_argument("--min-coverage", type=float, default=0.05, help="裁剪区域内波形掩码占比下限。")
+    parser.add_argument("--coverage-kernel", type=int, default=45, help="coverage 计算时的膨胀核大小。")
+    parser.add_argument("--coverage-attempts", type=int, default=60, help="满足 coverage 条件的最大尝试次数。")
+    parser.add_argument("--guided-prob", type=float, default=1.0, help="使用掩码引导裁剪的概率。")
+    parser.add_argument(
+        "--guided-expand",
+        type=float,
+        default=0.35,
+        help="掩码引导裁剪时，相对波形 bbox 的扩张比例（0.35 表示扩张 35%）。",
+    )
+    parser.add_argument(
+        "--guided-jitter",
+        type=float,
+        default=0.15,
+        help="掩码引导裁剪时，裁剪窗口中心的随机抖动比例（相对窗口大小）。",
+    )
+    parser.add_argument(
+        "--guided-min-area",
+        type=float,
+        default=0.0005,
+        help="掩码连通域占整幅图像的最小比例，低于该值的区域会被忽略。",
+    )
+    parser.add_argument("--limit", type=int, default=None, help="仅处理前 N 张整页（调试用）。")
+    parser.add_argument("--seed", type=int, default=2025, help="随机种子。")
+    parser.add_argument("--workers", type=int, default=max(1, os.cpu_count() or 1), help="并行进程数。")
+    parser.add_argument("--overwrite", action="store_true", help="允许覆盖已存在的输出。")
+    parser.add_argument("--tmp-dir", type=Path, default=None, help="中间结果临时目录，默认为 output-root/_tmp。")
+    parser.add_argument(
+        "--module-set",
+        choices=["all", "moire-required", "moire-blur-required", "moire-only"],
+        default="all",
+        help=(
+            "选择启用的增强模块；'moire-required' 强制包含摩尔纹，"
+            "'moire-blur-required' 同时强制摩尔纹与高斯模糊，'moire-only' 仅保留摩尔纹。"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = _parse_args(argv)
+
+    if not args.image_root.exists():
+        raise FileNotFoundError(f"未找到波形图片目录：{args.image_root}")
+    if not args.mask_root.exists():
+        raise FileNotFoundError(f"未找到波形掩码目录：{args.mask_root}")
+    if not args.grid_mask.exists():
+        raise FileNotFoundError(f"未找到网格掩码：{args.grid_mask}")
+
+    mask_lookup = _build_mask_lookup(args.mask_root, suffix=args.mask_suffix)
+    sources: List[tuple[Path, Path, Path]] = []
+    for image_path in _iter_images(args.image_root):
+        mask_path = mask_lookup.get(image_path.stem)
+        if mask_path is None:
+            print(f"警告：{image_path.stem} 缺少掩码，已跳过。")
+            continue
+        sources.append((image_path, args.grid_mask, mask_path))
+
+    if not sources:
+        raise RuntimeError("未找到有效的波形样本。")
+
+    if args.limit is not None:
+        sources = sources[: args.limit]
+
+    images_dir = args.output_root / "images"
+    masks_dir = args.output_root / "masks"
+    tmp_root = args.tmp_dir or (args.output_root / "_tmp")
+
+    if args.output_root.exists() and not args.overwrite:
+        existing = list((args.output_root / "images").glob("*.png"))
+        if existing:
+            raise FileExistsError(f"{args.output_root} 已包含数据，请使用 --overwrite 或清理目录。")
+
+    negative_params = NegativeSampleParams(image_size=args.crop_out)
+
+    if args.module_set == "all":
+        enable_wrinkle = True
+        enable_blur = True
+        force_blur = False
+        enable_noise = True
+        enable_occlusion = True
+        enable_stain = True
+        enable_moire = True
+        enable_gray = True
+        force_moire = False
+        ensure_active_module = True
+    elif args.module_set == "moire-required":
+        enable_wrinkle = True
+        enable_blur = True
+        force_blur = False
+        enable_noise = True
+        enable_occlusion = True
+        enable_stain = True
+        enable_moire = True
+        enable_gray = True
+        force_moire = True
+        ensure_active_module = True
+    elif args.module_set == "moire-blur-required":
+        enable_wrinkle = True
+        enable_blur = True
+        force_blur = True
+        enable_noise = True
+        enable_occlusion = True
+        enable_stain = True
+        enable_moire = True
+        enable_gray = True
+        force_moire = True
+        ensure_active_module = True
+    else:  # moire-only
+        enable_wrinkle = False
+        enable_blur = False
+        force_blur = False
+        enable_noise = False
+        enable_occlusion = False
+        enable_stain = False
+        enable_moire = True
+        enable_gray = False
+        force_moire = True
+        ensure_active_module = False
+
+    worker_config = WorkerConfig(
+        samples_per_image=args.samples_per_image,
+        negative_per_image=args.negative_per_image,
+        allow_out_of_bounds_prob=args.allow_out_of_bounds_prob,
+        crop_min_size=args.crop_min,
+        crop_max_size=args.crop_max,
+        crop_out_size=args.crop_out,
+        min_mask_coverage=max(0.0, args.min_coverage),
+        coverage_dilation_kernel=max(1, args.coverage_kernel),
+        coverage_max_attempts=max(1, args.coverage_attempts),
+        mask_guided_prob=max(0.0, min(1.0, args.guided_prob)),
+        mask_guided_expand_ratio=max(0.0, args.guided_expand),
+        mask_guided_jitter_ratio=max(0.0, args.guided_jitter),
+        mask_guided_min_area_ratio=max(0.0, args.guided_min_area),
+        negative_params=negative_params,
+        output_images=images_dir,
+        output_masks=masks_dir,
+        tmp_root=tmp_root,
+        overwrite=args.overwrite,
+        seed_base=args.seed * 1_000_003,
+        enable_wrinkle=enable_wrinkle,
+        enable_blur=enable_blur,
+        enable_noise=enable_noise,
+        enable_occlusion=enable_occlusion,
+        enable_stain=enable_stain,
+        enable_moire=enable_moire,
+        enable_gray=enable_gray,
+        force_moire=force_moire,
+        force_blur=force_blur,
+        ensure_active_module=ensure_active_module,
+    )
+
+    jobs: List[Job] = []
+    for idx, (image_path, grid_mask, coverage_mask) in enumerate(sources):
+        jobs.append(
+            Job(
+                index=idx,
+                image_path=image_path,
+                mask_path=grid_mask,
+                coverage_mask_path=coverage_mask,
+            )
+        )
+
+    images_dir.mkdir(parents=True, exist_ok=True)
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    tmp_root.mkdir(parents=True, exist_ok=True)
+
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(processes=args.workers, initializer=_init_worker, initargs=(worker_config,)) as pool:
+        progress = tqdm(total=len(jobs), desc="构建波形样本", unit="图", disable=len(jobs) == 0)
+        try:
+            for image_path, pos_count, neg_count in pool.imap_unordered(_process_job, jobs):
+                print(f"[{image_path.name}] 正样本 {pos_count} 个，负样本 {neg_count} 个")
+                progress.update(1)
+        finally:
+            progress.close()
+
+    shutil.rmtree(tmp_root, ignore_errors=True)
+    print(f"完成，共处理 {len(jobs)} 张波形图片。输出目录：{args.output_root}")
+
+
+if __name__ == "__main__":
+    main()

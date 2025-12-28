@@ -112,12 +112,9 @@ def _pad_with_random_border(image: np.ndarray, pad: int, noise_sigma: float) -> 
 
 def _prepare_binary_mask(mask: np.ndarray) -> np.ndarray:
     mask_binary = (mask > 0).astype(np.uint8)
-    if gpu_ops.available():
-        thick = gpu_ops.binary_dilate(mask_binary, 3, iterations=1)
-    else:
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        thick = cv2.dilate(mask_binary, kernel, iterations=1)
-    return np.where(thick > 0, 255, 0).astype(np.uint8)
+    mask_binary = (mask > 0).astype(np.uint8)
+    # Removed initial dilation to preserve 1px width
+    return np.where(mask_binary > 0, 255, 0).astype(np.uint8)
 
 
 def _warp_additional_mask(mask: np.ndarray, transform: TransformResult) -> np.ndarray:
@@ -357,7 +354,12 @@ def _generate_single_crop(
 
         for _ in range(coverage_attempts):
             if guided_enabled:
-                rect = _sample_mask_guided_rectangle(mask_binary, kernel, crop_params)
+                # Prioritize coverage_mask for guiding if available (e.g. seeking waveforms)
+                guide_source = mask_binary
+                if coverage_mask is not None:
+                     guide_source = (coverage_mask > 0).astype(np.uint8)
+                     
+                rect = _sample_mask_guided_rectangle(guide_source, kernel, crop_params)
                 if rect is None:
                     guided_enabled = False
                     rect = sample_rectangle()
@@ -442,22 +444,13 @@ def _generate_single_crop(
     # ... Helper function to process binary mask chunks ...
     def _process_chunk_mask(chunk_mask: np.ndarray, params: CropParams) -> np.ndarray:
         binary_chunk = (chunk_mask > 0).astype(np.uint8)
-        if gpu_ops.available():
-            closed = gpu_ops.binary_closing(binary_chunk, 3)
-        else:
-            k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            closed = cv2.morphologyEx(binary_chunk, cv2.MORPH_CLOSE, k_close)
-        
-        thinned = zhang_suen_thinning(closed)
+        # Removed binary_closing to prevent merging of adjacent lines.
+        # Direct thinning ensures we keep the original separation.
+        thinned = zhang_suen_thinning(binary_chunk)
         resized_skel = resize_skeleton(thinned, params.out_size)
         
-        if gpu_ops.available():
-            thick = gpu_ops.binary_dilate((resized_skel > 0).astype(np.uint8), 3, iterations=1)
-            final_chunk = np.where(thick > 0, 1, 0).astype(np.uint8)
-        else:
-            k_thick = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            dilated = cv2.dilate(resized_skel, k_thick, iterations=1)
-            final_chunk = np.where(dilated > 0, 1, 0).astype(np.uint8)
+        # Explicitly removed dilation to enforce 1px width
+        final_chunk = np.where(resized_skel > 0, 1, 0).astype(np.uint8)
         return final_chunk
 
     # Process Grid Mask (Label 1)

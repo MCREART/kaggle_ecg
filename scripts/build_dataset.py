@@ -207,11 +207,12 @@ def _save_positive_sample(
             allow_out_of_bounds=allow_oob,
             corner_override=corner_override,
             corner_focus_prob=0.0,
-            min_mask_coverage=0.3,
+            min_mask_coverage=0.1,  # Relaxed from 0.3
             coverage_dilation_kernel=9,
-            coverage_max_attempts=60,
-            min_horizontal_density=0.1,
-            min_horizontal_rows=2,
+            coverage_max_attempts=200,    # Increased from 60
+            min_horizontal_density=0.05,  # Relaxed from 0.1
+            min_horizontal_rows=1,        # Relaxed from 2
+            mask_guided_prob=0.8,         # Actively search for waveforms
         )
         if job.crop_overrides:
             for key, value in job.crop_overrides.items():
@@ -332,7 +333,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--negative-per-image", type=int, default=2, help="每张原图生成的负样本数量。")
     parser.add_argument("--allow-out-of-bounds-prob", type=float, default=0.4, help="裁剪允许越界的概率。")
     parser.add_argument("--crop-min", type=int, default=256, help="随机裁剪下限。")
-    parser.add_argument("--crop-max", type=int, default=768, help="随机裁剪上限。")
+    parser.add_argument("--crop-max", type=int, default=512, help="随机裁剪上限。")
     parser.add_argument("--crop-out", type=int, default=512, help="输出分辨率。")
     parser.add_argument("--limit", type=int, default=None, help="仅处理前 N 张原图（调试用）。")
     parser.add_argument("--seed", type=int, default=1337, help="随机种子。")

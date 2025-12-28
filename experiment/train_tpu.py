@@ -33,6 +33,7 @@ try:
     import torch_xla.distributed.xla_multiprocessing as xmp
     import torch_xla.distributed.parallel_loader as pl
     import torch_xla.utils.utils as xu
+    import torch_xla.runtime as xr
 except ImportError:
     print("警告: 未检测到 torch_xla，请确保已安装 TPU 环境。")
 
@@ -458,14 +459,14 @@ def prepare_dataloaders(
     # DistributedSampler 对 TPU 多核训练至关重要
     train_sampler = DistributedSampler(
         train_ds,
-        num_replicas=xm.xrt_world_size(),
-        rank=xm.get_ordinal(),
+        num_replicas=xr.world_size(),
+        rank=xr.global_ordinal(),
         shuffle=True,
     )
     val_sampler = DistributedSampler(
         val_ds,
-        num_replicas=xm.xrt_world_size(),
-        rank=xm.get_ordinal(),
+        num_replicas=xr.world_size(),
+        rank=xr.global_ordinal(),
         shuffle=False,
     )
 
@@ -559,10 +560,24 @@ def run_training_process(rank: int, args: argparse.Namespace) -> None:
                 num_classes=model_cfg.classes,
             )
             
-            epoch_stats = {"epoch": epoch, **train_stats, **val_stats}
+            # 学习率调整 (基于 val_loss)
+            current_lr = optimizer.param_groups[0]['lr']
+            # 这里简化处理：默认使用 ReduceLROnPlateau
+            if not hasattr(optimizer, '_scheduler'):
+                optimizer._scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, mode='min', factor=0.5, patience=3, verbose=True
+                )
+            
+            # Update scheduler
+            optimizer._scheduler.step(val_stats['val_loss'])
+            new_lr = optimizer.param_groups[0]['lr']
+            
+            epoch_stats = {"epoch": epoch, "lr": current_lr, **train_stats, **val_stats}
             history.append(epoch_stats)
             
-            msg = " | ".join(f"{k}: {v:.4f}" for k, v in epoch_stats.items() if isinstance(v, float))
+            msg = " | ".join(f"{k}: {v:.4f}" for k, v in epoch_stats.items() if isinstance(v, (int, float)))
+            if new_lr != current_lr:
+                msg += f" | LR update: {current_lr:.1e} -> {new_lr:.1e}"
             xm.master_print(f"  {msg}")
 
             score = val_stats.get("val_dice", -val_stats["val_loss"])
@@ -588,12 +603,12 @@ def run_training_process(rank: int, args: argparse.Namespace) -> None:
                     model_config=model_cfg,
                 )
 
-             with (model_dir / "history.json").open("w", encoding="utf-8") as f:
+            with (model_dir / "history.json").open("w", encoding="utf-8") as f:
                 json.dump(history, f, ensure_ascii=False, indent=2)
              
-             # Sync history to GCS as well
-             if args.gcs_dir:
-                 subprocess.Popen(["gsutil", "cp", str(model_dir / "history.json"), f"{args.gcs_dir.rstrip('/')}/history.json"])
+            # Sync history to GCS as well
+            if args.gcs_dir:
+                subprocess.Popen(["gsutil", "cp", str(model_dir / "history.json"), f"{args.gcs_dir.rstrip('/')}/history.json"])
 
 
 def main():
@@ -605,9 +620,8 @@ def main():
     
     # 注意：在调用 xmp.spawn 之前，绝对不能调用任何 torch_xla 的 API
     # 否则 Runtime 会被初始化为单进程模式，导致后续 spawn 失败。
-    # 对于 TPU VM v6e，我们默认强制使用 4 核心。
-    
-    nprocs = args.nprocs or 4
+    # 用户确认有 8 卡环境
+    nprocs = args.nprocs or 8
 
     print(f"启动 {nprocs} 个进程进行训练...")
     xmp.spawn(run_training_process, nprocs=nprocs, args=(args,), start_method='fork')

@@ -439,27 +439,48 @@ def _generate_single_crop(
         crop_img, (crop_params.out_size, crop_params.out_size), interpolation=cv2.INTER_LINEAR
     )
 
-    binary_mask = (crop_mask > 0).astype(np.uint8)
-    if gpu_ops.available():
-        closed = gpu_ops.binary_closing(binary_mask, 3)
-    else:
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        closed = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
-    thinned = zhang_suen_thinning(closed)
-    resized_mask = resize_skeleton(thinned, crop_params.out_size)
-    if gpu_ops.available():
-        thick = gpu_ops.binary_dilate((resized_mask > 0).astype(np.uint8), 3, iterations=1)
-        resized_mask = np.where(thick > 0, 255, 0).astype(np.uint8)
-    else:
-        thickness_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        resized_mask = cv2.dilate(resized_mask, thickness_kernel, iterations=1)
-        resized_mask = np.where(resized_mask > 0, 255, 0).astype(np.uint8)
+    # ... Helper function to process binary mask chunks ...
+    def _process_chunk_mask(chunk_mask: np.ndarray, params: CropParams) -> np.ndarray:
+        binary_chunk = (chunk_mask > 0).astype(np.uint8)
+        if gpu_ops.available():
+            closed = gpu_ops.binary_closing(binary_chunk, 3)
+        else:
+            k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            closed = cv2.morphologyEx(binary_chunk, cv2.MORPH_CLOSE, k_close)
+        
+        thinned = zhang_suen_thinning(closed)
+        resized_skel = resize_skeleton(thinned, params.out_size)
+        
+        if gpu_ops.available():
+            thick = gpu_ops.binary_dilate((resized_skel > 0).astype(np.uint8), 3, iterations=1)
+            final_chunk = np.where(thick > 0, 1, 0).astype(np.uint8)
+        else:
+            k_thick = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            dilated = cv2.dilate(resized_skel, k_thick, iterations=1)
+            final_chunk = np.where(dilated > 0, 1, 0).astype(np.uint8)
+        return final_chunk
+
+    # Process Grid Mask (Label 1)
+    grid_processed = _process_chunk_mask(crop_mask, crop_params)
+    
+    # Process Wave/Coverage Mask if available (Label 2)
+    wave_processed = None
+    if coverage_mask is not None:
+        crop_wave = coverage_mask[y : y + rect_height, x : x + rect_width]
+        wave_processed = _process_chunk_mask(crop_wave, crop_params)
+
+    # Merge labels: 0=BG, 1=Grid, 2=Wave
+    # Priority: Wave (2) > Grid (1) > BG (0)
+    final_combined_mask = np.zeros((crop_params.out_size, crop_params.out_size), dtype=np.uint8)
+    final_combined_mask[grid_processed > 0] = 1
+    if wave_processed is not None:
+        final_combined_mask[wave_processed > 0] = 2
 
     output_dir.mkdir(parents=True, exist_ok=True)
     image_path = output_dir / f"crop_{index:02d}_img.png"
     mask_path = output_dir / f"crop_{index:02d}_mask.png"
     Image.fromarray(resized_img).save(image_path)
-    Image.fromarray(resized_mask).save(mask_path)
+    Image.fromarray(final_combined_mask).save(mask_path)
     if crop_params.write_metadata:
         metadata = {
             "x": int(x),

@@ -186,7 +186,7 @@ def _save_positive_sample(
     final_image_path = config.output_images / f"{stem}.png"
     final_mask_path = config.output_masks / f"{stem}_mask.png"
     if not config.overwrite and (final_image_path.exists() or final_mask_path.exists()):
-        raise FileExistsError(f"{stem} 已存在，请使用 --overwrite 或清理输出目录。")
+        return
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="cg_", dir=config.tmp_root))
     try:
@@ -219,26 +219,35 @@ def _save_positive_sample(
                     setattr(crop_params, key, value)
                 else:
                     raise AttributeError(f"CropParams 不支持属性 {key}")
-        generate_transformed_crops(
-            image_path=job.image_path,
-            mask_path=mask_path,
-            coverage_mask_path=job.coverage_mask_path,
-            output_dir=tmp_dir,
-            transform=transform,
-            crop=crop_params,
-            wrinkle=wrinkle,
-            blur=blur,
-            gray=gray,
-            noise=noise,
-            occlusion=occlusion,
-            stain=stain,
-            moire=moire,
-            seed=rng.randrange(0, 2**31),
-        )
+                    
+        try:
+            generate_transformed_crops(
+                image_path=job.image_path,
+                mask_path=mask_path,
+                coverage_mask_path=job.coverage_mask_path,
+                output_dir=tmp_dir,
+                transform=transform,
+                crop=crop_params,
+                wrinkle=wrinkle,
+                blur=blur,
+                gray=gray,
+                noise=noise,
+                occlusion=occlusion,
+                stain=stain,
+                moire=moire,
+                seed=rng.randrange(0, 2**31),
+            )
+        except RuntimeError as e:
+            # Skip this sample if generation fails (e.g. no valid crop found)
+            print(f"[Warning] Skipping sample {stem} due to error: {e}")
+            return
+
         src_image = tmp_dir / "crop_00_img.png"
         src_mask = tmp_dir / "crop_00_mask.png"
         if not src_image.exists() or not src_mask.exists():
-            raise FileNotFoundError(f"生成失败：{src_image} 或 {src_mask} 不存在")
+            print(f"[Warning] Skipping sample {stem}: Output files not found after generation.")
+            return
+
         config.output_images.mkdir(parents=True, exist_ok=True)
         config.output_masks.mkdir(parents=True, exist_ok=True)
         shutil.move(src=str(src_image), dst=final_image_path)
@@ -255,7 +264,7 @@ def _save_negative_sample(job: Job, neg_idx: int, rng: random.Random) -> None:
     final_image_path = config.output_images / f"{stem}.png"
     final_mask_path = config.output_masks / f"{stem}_mask.png"
     if not config.overwrite and (final_image_path.exists() or final_mask_path.exists()):
-        raise FileExistsError(f"{stem} 已存在，请使用 --overwrite 或清理输出目录。")
+        return
 
     image = synthesize_negative_image(params, rng)
     mask = np.zeros((params.image_size, params.image_size), dtype=np.uint8)

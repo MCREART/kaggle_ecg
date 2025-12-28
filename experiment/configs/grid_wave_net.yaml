@@ -1,0 +1,38 @@
+experiment:
+  name: grid_wave_mix_run
+  seed: 2025
+  output_dir: ./runs
+
+data:
+  train_dirs:
+    - ../../dataset_grid_wave_mix
+  val_split: 0.1
+  # TPU v6e normally has lots of memory, can increase batch size if needed
+  # but standard batch_size=32 is safe.
+  batch_size: 32
+  num_workers: 32
+  augment: true
+  in_channels: 3
+  # 0: BG, 1: Grid, 2: Wave
+  classes: 3
+
+optim:
+  type: adamw
+  lr: 0.001
+  weight_decay: 0.0001
+
+training:
+  epochs: 50
+  log_interval: 25
+  amp: true
+  grad_clip: 1.0
+
+loss:
+  type: ce
+  dice_weight: 0.0  # Usually 0 for CE in this codebase unless implemented
+
+models:
+  - key: unet_efficientnetb0
+    encoder_weights: imagenet
+    in_channels: 3
+    classes: 3

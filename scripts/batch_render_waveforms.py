@@ -82,6 +82,105 @@ def load_fs_lookup(meta_path: Path | None) -> Mapping[str, float]:
     return mapping
 
 
+from PIL import ImageDraw, ImageFont
+import random
+
+from PIL import ImageDraw, ImageFont
+import random
+import datetime
+
+def add_synthetic_text(image, rng_seed):
+    """Adds structured synthetic metadata text to the image (Header/Footer)."""
+    random.seed(rng_seed)
+    draw = ImageDraw.Draw(image)
+    w, h = image.size
+    
+    # Try multiple common Sans fonts
+    font_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "DejaVuSans.ttf" 
+    ]
+    
+    font_path = None
+    for p in font_candidates:
+        try:
+            # Test open
+            ImageFont.truetype(p, 20)
+            font_path = p
+            break
+        except Exception:
+            continue
+            
+    try:
+        if font_path:
+            # Header fonts
+            font_header = ImageFont.truetype(font_path, 40)
+            font_sub = ImageFont.truetype(font_path, 30)
+            font_small = ImageFont.truetype(font_path, 24)
+        else:
+            font_header = ImageFont.load_default()
+            font_sub = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+    except IOError:
+        font_header = ImageFont.load_default()
+        font_sub = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+
+    # --- Header Information ---
+    # Top Left: Demographics
+    genders = ["Male", "Female", "M", "F"]
+    pid = "".join([str(random.randint(0, 9)) for _ in range(8)])
+    age = random.randint(18, 99)
+    gender = random.choice(genders)
+    
+    # Random realistic date
+    year = random.randint(2018, 2025)
+    month = random.randint(1, 12)
+    day = random.randint(1, 28)
+    hour = random.randint(0, 23)
+    minute = random.randint(0, 59)
+    date_str = f"{day:02d}-{month:02d}-{year} {hour:02d}:{minute:02d}"
+    
+    # Name (Initials or random string)
+    name = f"Patient_{random.randint(1000,9999)}"
+    
+    # Draw Top Left Block
+    # Line 1: Name ID
+    draw.text((40, 30), f"Name: {name}", fill="black", font=font_header)
+    draw.text((40, 80), f"ID: {pid}", fill="black", font=font_sub)
+    # Line 2: Date Age Sex
+    draw.text((40, 120), f"Date: {date_str}   Age: {age}yr   Sex: {gender}", fill="black", font=font_sub)
+
+    # Top Right: Hospital / Institution
+    hospitals = [
+        "General Hospital", "Memorial Medical Center", "University Hospital", 
+        "Cardiology Dept", "St. John's", "City Heart Center"
+    ]
+    hosp_name = random.choice(hospitals)
+    bbox = draw.textbbox((0, 0), hosp_name, font=font_header)
+    tw = bbox[2] - bbox[0]
+    draw.text((w - tw - 50, 30), hosp_name, fill="black", font=font_header)
+    
+    # --- Footer Information ---
+    # Standard technicals
+    speed = "25 mm/s"
+    gain = "10 mm/mV"
+    filters = ["150Hz", "100Hz", "40Hz", "Notch On"]
+    filt = random.choice(filters)
+    
+    tech_str = f"{speed}   {gain}   {filt}"
+    
+    # Bottom Center or Right
+    bbox = draw.textbbox((0, 0), tech_str, font=font_sub)
+    tw = bbox[2] - bbox[0]
+    # Place at bottom margin
+    draw.text((w // 2 - tw // 2, h - 60), tech_str, fill="black", font=font_sub)
+
+    return image
+
+
 def render_single(
     csv_path: Path,
     grid_path: Path,
@@ -105,10 +204,14 @@ def render_single(
         csv_path,
         grid_path,
         options=options,
-        header_text=record_id,
+        header_text="", # Disable default center header
         rng_seed=rng_seed,
         fs_override=fs_override,
     )
+    
+    # Add structured synthetic metadata
+    image = add_synthetic_text(image, rng_seed)
+    
     image_dir.mkdir(parents=True, exist_ok=True)
     image.save(image_path)
 

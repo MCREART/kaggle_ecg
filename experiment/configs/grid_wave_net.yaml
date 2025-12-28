@@ -29,7 +29,8 @@ training:
 
 loss:
   type: ce
-  dice_weight: 0.0  # Usually 0 for CE in this codebase unless implemented
+  dice_weight: 0.0
+  weights: [1.0, 1.0, 5.0] # [BG, Grid, Wave]
 
 models:
   - key: unet_efficientnetb0

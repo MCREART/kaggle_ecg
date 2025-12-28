@@ -193,69 +193,21 @@ def to_training_config(cfg: dict[str, Any]) -> TrainingConfig:
     )
 
 
+@dataclass(slots=True)
+class LossConfig:
+    primary: str
+    dice_weight: float
+    weights: list[float] | None = None
+    weights: list[float] | None = None
+
 def to_loss_config(cfg: dict[str, Any]) -> LossConfig:
     loss = cfg.get("loss", {})
     primary = str(loss.get("type", "bce")).lower()
     dice_weight = float(loss.get("dice_weight", 0.5 if primary == "bce" else 0.0))
-    return LossConfig(primary=primary, dice_weight=dice_weight)
-
-
-def resolve_model_configs(cfg: dict[str, Any], *, default_in_channels: int, default_classes: int) -> List[ModelConfig]:
-    spec_map = {spec.key: spec for spec in iter_model_specs()}
-    models_cfg = cfg.get("models")
-    if not models_cfg:
-        raise ValueError("配置需包含 models 列表")
-
-    resolved: list[ModelConfig] = []
-    for entry in models_cfg:
-        key = entry.get("key")
-        spec = spec_map.get(key)
-        if spec is None:
-            continue # Skip unknown models or handle error
-        
-        resolved.append(ModelConfig(
-            spec=spec,
-            encoder_weights=entry.get("encoder_weights", "imagenet"),
-            in_channels=int(entry.get("in_channels", default_in_channels)),
-            classes=int(entry.get("classes", default_classes)),
-            model_kwargs=entry.get("model_kwargs", {}),
-        ))
-    return resolved
-
-
-class DiceLoss(nn.Module):
-    def __init__(self, eps: float = 1e-6) -> None:
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        probs = torch.sigmoid(logits)
-        targets = targets.float()
-        dims = (0, 2, 3)
-        intersection = torch.sum(probs * targets, dims)
-        denominator = torch.sum(probs + targets, dims)
-        dice = (2 * intersection + self.eps) / (denominator + self.eps)
-        return 1 - dice.mean()
-
-
-def dice_metric(logits: torch.Tensor, targets: torch.Tensor) -> float:
-    probs = torch.sigmoid(logits)
-    preds = (probs > 0.5).float()
-    intersection = torch.sum(preds * targets)
-    denominator = torch.sum(preds + targets)
-    if denominator == 0:
-        return 1.0
-    return float((2 * intersection + 1e-6) / (denominator + 1e-6))
-
-
-def create_optimizer(params: Iterable[torch.Tensor], cfg: OptimConfig) -> torch.optim.Optimizer:
-    if cfg.type == "adam":
-        return torch.optim.Adam(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
-    if cfg.type == "adamw":
-        return torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
-    if cfg.type == "sgd":
-        return torch.optim.SGD(params, lr=cfg.lr, momentum=0.9, weight_decay=cfg.weight_decay, nesterov=True)
-    raise ValueError(f"不支持的优化器类型: {cfg.type}")
+    weights = loss.get("weights")
+    if weights:
+        weights = [float(w) for w in weights]
+    return LossConfig(primary=primary, dice_weight=dice_weight, weights=weights)
 
 
 def train_one_epoch(
@@ -271,7 +223,17 @@ def train_one_epoch(
 ) -> dict[str, float]:
     model.train()
     dice_loss_fn = DiceLoss()
-    primary_loss_fn = nn.BCEWithLogitsLoss() if num_classes == 1 else nn.CrossEntropyLoss()
+    
+    if num_classes == 1:
+        primary_loss_fn = nn.BCEWithLogitsLoss()
+    else:
+        weight_tensor = None
+        if loss_config.weights:
+            if len(loss_config.weights) != num_classes:
+                print(f"[WARN] Loss weights length ({len(loss_config.weights)}) != num_classes ({num_classes}). Ignoring weights.")
+            else:
+                weight_tensor = torch.tensor(loss_config.weights, device=device)
+        primary_loss_fn = nn.CrossEntropyLoss(weight=weight_tensor)
 
     total_loss = 0.0
     total_batches = 0
@@ -335,6 +297,9 @@ def evaluate(
     batches = 0
     primary_loss_fn = nn.BCEWithLogitsLoss() if num_classes == 1 else nn.CrossEntropyLoss()
     
+    # Store correct and total pixels for each class: [num_classes, 2] -> (correct, total)
+    class_stats = torch.zeros((num_classes, 2), device=device)
+
     para_loader = pl.ParallelLoader(loader, [device])
 
     with torch.no_grad():
@@ -347,28 +312,70 @@ def evaluate(
                 primary_loss = primary_loss_fn(outputs, masks)
                 total_loss += primary_loss.item()
                 total_dice += dice_metric(outputs, masks)
+                
+                # Binary accuracy for Class 1 (Active) vs Class 0 (Background)
+                preds = (torch.sigmoid(outputs) > 0.5).float()
+                # For consistency with multi-class logic below:
+                # Class 0 stats
+                # class_stats[0, 0] += ((preds == 0) & (masks == 0)).sum()
+                # class_stats[0, 1] += (masks == 0).sum()
+                # Class 1 stats
+                # class_stats[1, 0] += ((preds == 1) & (masks == 1)).sum()
+                # class_stats[1, 1] += (masks == 1).sum()
+                # But since num_classes=1 usually implies binary output but might not use the struct well, 
+                # let's keep it simple for multi-class request. 
+                # Actually, num_classes=1 is a special case in this code. 
+                # Let's focus on the user's multi-class request (num_classes=3).
             else:
                 masks_int = masks.long()
                 primary_loss = primary_loss_fn(outputs, masks_int)
                 total_loss += primary_loss.item()
                 
+                preds = torch.argmax(outputs, dim=1)
+                
+                for c in range(num_classes):
+                    class_mask = (masks_int == c)
+                    class_correct = ((preds == c) & class_mask).sum()
+                    class_total = class_mask.sum()
+                    class_stats[c, 0] += class_correct
+                    class_stats[c, 1] += class_total
+                
             batches += 1
 
     # Reduce metrics across cores
-    metrics_tensor = torch.tensor([total_loss, total_dice, batches], device=device)
-    reduced = xm.all_reduce('sum', metrics_tensor)
+    # [total_loss, total_dice, batches]
+    basic_metrics = torch.tensor([total_loss, total_dice, batches], device=device)
+    reduced_basic = xm.all_reduce('sum', basic_metrics)
+    reduced_class_stats = xm.all_reduce('sum', class_stats)
     
-    final_loss = reduced[0].item() / max(reduced[2].item(), 1)
-    final_dice = reduced[1].item() / max(reduced[2].item(), 1)
+    count = max(reduced_basic[2].item(), 1)
+    final_loss = reduced_basic[0].item() / count
+    final_dice = reduced_basic[1].item() / count
 
-    metric_str = f"val_time: {time.time() - t_start:.2f}s"
-    # 仅 master 打印时间，避免刷屏 (虽然 logging 在外层)
-    if xm.is_master_ordinal():
-         pass 
-
-    metrics = {"val_loss": final_loss, "val_time": time.time() - t_start}
+    metrics = {
+        "val_loss": final_loss, 
+        "val_time": time.time() - t_start
+    }
+    
     if num_classes == 1:
         metrics["val_dice"] = final_dice
+    else:
+        # Multi-class breakdown
+        class_names = {0: "BG", 1: "Grid", 2: "Wave"}
+        total_correct = 0
+        total_pixels = 0
+        for c in range(num_classes):
+             correct = reduced_class_stats[c, 0].item()
+             total = reduced_class_stats[c, 1].item()
+             acc = correct / max(total, 1)
+             name = class_names.get(c, f"C{c}")
+             metrics[f"acc_{name}"] = acc
+             
+             total_correct += correct
+             total_pixels += total
+             
+        metrics["val_acc"] = total_correct / max(total_pixels, 1)
+
     return metrics
 
 
@@ -565,7 +572,7 @@ def run_training_process(rank: int, args: argparse.Namespace) -> None:
             # 这里简化处理：默认使用 ReduceLROnPlateau
             if not hasattr(optimizer, '_scheduler'):
                 optimizer._scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    optimizer, mode='min', factor=0.5, patience=3, verbose=True
+                    optimizer, mode='min', factor=0.5, patience=3
                 )
             
             # Update scheduler

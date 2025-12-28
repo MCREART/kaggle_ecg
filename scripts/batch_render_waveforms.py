@@ -252,7 +252,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--nonzero-eps", type=float, default=1e-4)
     ap.add_argument("--label-font-size", type=int, default=36)
     ap.add_argument("--small-font-size", type=int, default=16)
-    ap.add_argument("--line-width", type=int, default=2, help="掩模线条宽度（像素）")
+    ap.add_argument("--line-width", type=int, default=1, help="掩模线条宽度（像素）")
     ap.add_argument("--metadata-csv", type=Path, default=GEN_SRC / "train.csv", help="记录采样率的元数据 CSV (id,fs,...)")
     return ap.parse_args()
 

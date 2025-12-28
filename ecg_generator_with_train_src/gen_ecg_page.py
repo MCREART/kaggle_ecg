@@ -430,7 +430,7 @@ def render_ecg_page(
             return
         x = np.linspace(lx, rx, num=len(seg), endpoint=False)
         ypx = base_y - (seg / MV_PER_BOX) * box_y
-        _polyline(draw, x, ypx, color=(0,0,0), width=2)
+        _polyline(draw, x, ypx, color=(0,0,0), width=1)
         # label: align just below the waveform baseline near left margin
         labx = lx + int(round((options.label_dx_boxes / short_w_boxes) * cell_w))
         laby = int(round(base_y + (options.label_dy_boxes / height_b) * cell_h))
@@ -454,9 +454,9 @@ def render_ecg_page(
         rx = grid.x_from_boxes(options.cal_dx_boxes + 1.0)
         step_top = grid.y_from_boxes(peak_b)
         # draw step: up, right, down
-        draw.line([(lx, base), (lx, step_top)], fill=(0,0,0), width=2)
-        draw.line([(lx, step_top), (rx, step_top)], fill=(0,0,0), width=2)
-        draw.line([(rx, step_top), (rx, base)], fill=(0,0,0), width=2)
+        draw.line([(lx, base), (lx, step_top)], fill=(0,0,0), width=1)
+        draw.line([(lx, step_top), (rx, step_top)], fill=(0,0,0), width=1)
+        draw.line([(rx, step_top), (rx, base)], fill=(0,0,0), width=1)
 
     # Draw 12 short leads in 3 rows × 4 cols to match reference page
     layout = [
@@ -518,7 +518,7 @@ def render_ecg_page(
         x = np.linspace(lx, rx, num=len(seg), endpoint=False)
         base = grid.y_from_boxes(row_baselines[3])
         ypx = base - (seg / MV_PER_BOX) * box_y
-        _polyline(draw, x, ypx, color=(0,0,0), width=2)
+        _polyline(draw, x, ypx, color=(0,0,0), width=1)
         label_dx = lx + int(round(0.6 * cell_w / long_w_boxes))
         label_dy = ty + int(round(0.8 * cell_h / height_b))
         draw.text((label_dx, label_dy), f"{long_ld}", fill=(0,0,0), font=font)

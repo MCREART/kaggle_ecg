@@ -38,7 +38,7 @@ cd ori_csv && tar -zxvf train-csvs.tar.gz && cd ..
 ```bash
 python scripts/batch_render_waveforms.py \
     --csv-root ori_csv/train-csvs \
-    --grid src/assets/grid_v2.png \
+    --grid ecg_generator_with_train_src/export/clean_ecg_grid.png \
     --image-dir data/wave_images \
     --mask-dir data/wave_masks
 ```
@@ -50,10 +50,12 @@ python scripts/batch_render_waveforms.py \
 
 ```bash
 python scripts/build_dataset.py \
-    --wave-root data \
-    --output dataset_grid_wave_mix \
-    --count 3000 \
-    --overwrite
+    --input-root ori_csv/train \
+    --mask image_data/complete_mask.png \
+    --wave-root data/wave_images \
+    --output-root dataset_grid_wave_mix \
+    --overwrite \
+
 ```
 
 ### 2.4 下载样本数据 (Utilities)

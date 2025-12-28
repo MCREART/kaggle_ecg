@@ -56,6 +56,21 @@ python scripts/build_dataset.py \
     --overwrite
 ```
 
+### 2.4 下载样本数据 (Utilities)
+
+如果需要下载少量真实数据用于测试或推理验证，可以使用 `scripts/download_subset.py`。
+该脚本会从 Kaggle 竞赛 `physionet-ecg-image-digitization` 中随机下载指定数量的样本。
+
+**使用示例：**
+```bash
+# 下载 10 个随机样本到 downloaded_subset/ 目录
+python scripts/download_subset.py
+```
+
+**依赖条件：**
+*   需要在 `~/.kaggle/kaggle.json` 配置好 Kaggle API Token。
+*   需要预先接受该竞赛的 Rules。
+
 ## 3. 模型训练 (TPU)
 
 使用 `experiment/train_tpu.py` 在 TPU 上进行多核并行训练。

@@ -210,6 +210,64 @@ def to_loss_config(cfg: dict[str, Any]) -> LossConfig:
     return LossConfig(primary=primary, dice_weight=dice_weight, weights=weights)
 
 
+def resolve_model_configs(cfg: dict[str, Any], *, default_in_channels: int, default_classes: int) -> List[ModelConfig]:
+    spec_map = {spec.key: spec for spec in iter_model_specs()}
+    models_cfg = cfg.get("models")
+    if not models_cfg:
+        raise ValueError("配置需包含 models 列表")
+
+    resolved: list[ModelConfig] = []
+    for entry in models_cfg:
+        key = entry.get("key")
+        spec = spec_map.get(key)
+        if spec is None:
+            continue # Skip unknown models or handle error
+        
+        resolved.append(ModelConfig(
+            spec=spec,
+            encoder_weights=entry.get("encoder_weights", "imagenet"),
+            in_channels=int(entry.get("in_channels", default_in_channels)),
+            classes=int(entry.get("classes", default_classes)),
+            model_kwargs=entry.get("model_kwargs", {}),
+        ))
+    return resolved
+
+
+class DiceLoss(nn.Module):
+    def __init__(self, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        targets = targets.float()
+        dims = (0, 2, 3)
+        intersection = torch.sum(probs * targets, dims)
+        denominator = torch.sum(probs + targets, dims)
+        dice = (2 * intersection + self.eps) / (denominator + self.eps)
+        return 1 - dice.mean()
+
+
+def dice_metric(logits: torch.Tensor, targets: torch.Tensor) -> float:
+    probs = torch.sigmoid(logits)
+    preds = (probs > 0.5).float()
+    intersection = torch.sum(preds * targets)
+    denominator = torch.sum(preds + targets)
+    if denominator == 0:
+        return 1.0
+    return float((2 * intersection + 1e-6) / (denominator + 1e-6))
+
+
+def create_optimizer(params: Iterable[torch.Tensor], cfg: OptimConfig) -> torch.optim.Optimizer:
+    if cfg.type == "adam":
+        return torch.optim.Adam(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    if cfg.type == "adamw":
+        return torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    if cfg.type == "sgd":
+        return torch.optim.SGD(params, lr=cfg.lr, momentum=0.9, weight_decay=cfg.weight_decay, nesterov=True)
+    raise ValueError(f"不支持的优化器类型: {cfg.type}")
+
+
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader,

@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from .config import WrinkleParams
+from .mask_utils import zhang_suen_thinning
 from .vector_mask import WrinkleWave
 
 
@@ -107,14 +108,17 @@ def apply_wrinkles(
         interpolation=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_REFLECT,
     )
-    warped_mask = cv2.remap(
+    # Soft warp for mask to preserve connectivity
+    warped_mask_soft = cv2.remap(
         mask,
         map_x,
         map_y,
-        interpolation=cv2.INTER_NEAREST,
+        interpolation=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
     )
+    _, warped_mask_bin = cv2.threshold(warped_mask_soft, 50, 255, cv2.THRESH_BINARY)
+    warped_mask = zhang_suen_thinning(warped_mask_bin.astype(np.uint8))
     warped_extra = None
     if extra_mask is not None:
         warped_extra = cv2.remap(

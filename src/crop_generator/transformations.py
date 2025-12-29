@@ -7,6 +7,7 @@ import numpy as np
 from dataclasses import dataclass
 
 from .config import TransformMode, TransformParams
+from .mask_utils import zhang_suen_thinning
 
 
 @dataclass(frozen=True)
@@ -85,14 +86,18 @@ def apply_transform(
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(0, 0, 0),
         )
-        warped_mask = cv2.warpAffine(
+        # Soft warp for mask to preserve connectivity
+        warped_mask_soft = cv2.warpAffine(
             mask,
             matrix,
             (width, height),
-            flags=cv2.INTER_NEAREST,
+            flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         )
+        _, warped_mask_bin = cv2.threshold(warped_mask_soft, 50, 255, cv2.THRESH_BINARY)
+        # Re-thin to ensuring 1px
+        warped_mask = zhang_suen_thinning(warped_mask_bin.astype(np.uint8))
         return TransformResult(image=warped_img, mask=warped_mask, matrix=matrix, mode=mode)
 
     if mode == "perspective":
@@ -109,14 +114,18 @@ def apply_transform(
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(0, 0, 0),
         )
-        warped_mask = cv2.warpPerspective(
+        # Soft warp for mask
+        warped_mask_soft = cv2.warpPerspective(
             mask,
             matrix,
             (width, height),
-            flags=cv2.INTER_NEAREST,
+            flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         )
+        _, warped_mask_bin = cv2.threshold(warped_mask_soft, 50, 255, cv2.THRESH_BINARY)
+        # Re-thin
+        warped_mask = zhang_suen_thinning(warped_mask_bin.astype(np.uint8))
         return TransformResult(image=warped_img, mask=warped_mask, matrix=matrix, mode=mode)
 
     raise ValueError(f"Unsupported transform mode: {mode}")

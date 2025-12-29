@@ -30,8 +30,13 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+# Allow importing from valid directory
+sys.path.append(str(Path(__file__).parent))
+from viz_dataset_masks import visualize_masks
+
 from crop_generator import (  # noqa: E402
     BlurParams,
+    ColorAugParams,
     CropParams,
     GrayParams,
     MoireParams,
@@ -39,6 +44,7 @@ from crop_generator import (  # noqa: E402
     NoiseParams,
     OcclusionParams,
     StainParams,
+    TextOverlayParams,
     TransformParams,
     WrinkleParams,
     generate_transformed_crops,
@@ -221,6 +227,25 @@ def _save_positive_sample(
                 else:
                     raise AttributeError(f"CropParams 不支持属性 {key}")
                     
+        # Color Augmentation
+        color_aug = ColorAugParams(
+             enabled=True,
+             brightness_range=(0.85, 1.15),
+             contrast_range=(0.85, 1.15),
+             saturation_range=(0.6, 1.4),
+             hue_range=(-0.02, 0.02),
+             warmth_range=(0.8, 1.2),
+        )
+
+        # Text Overlay Distractors
+        text_overlay = TextOverlayParams(
+            enabled=True,
+            count_range=(2, 6),
+            font_scale_range=(0.6, 1.4),
+            opacity_range=(0.6, 0.95),
+            clear_mask=False
+        )
+
         try:
             generate_transformed_crops(
                 image_path=job.image_path,
@@ -236,6 +261,8 @@ def _save_positive_sample(
                 occlusion=occlusion,
                 stain=stain,
                 moire=moire,
+                color_aug=color_aug,
+                text_overlay=text_overlay,
                 seed=rng.randrange(0, 2**31),
             )
         except RuntimeError as e:
@@ -509,6 +536,22 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     shutil.rmtree(tmp_root, ignore_errors=True)
     print(f"完成，共处理 {len(jobs)} 张图片。输出目录：{args.output_root}")
+
+    # Automatic Visualization
+    viz_out = Path("viz_masks_output")
+    if viz_out.exists():
+        shutil.rmtree(viz_out)
+    viz_out.mkdir(exist_ok=True)
+    
+    print("正在生成可视化样本 (10张)...")
+    try:
+        visualize_masks(
+            mask_dir=args.output_root / "masks",
+            output_dir=viz_out,
+            count=10
+        )
+    except Exception as e:
+        print(f"[Warning] Visualization failed: {e}")
 
 
 if __name__ == "__main__":

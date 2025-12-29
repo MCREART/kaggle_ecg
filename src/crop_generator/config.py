@@ -157,6 +157,33 @@ class NegativeSampleParams:
 
 
 @dataclass(slots=True)
+class ColorAugParams:
+    """Parameters for color jitter and white balance."""
+
+    enabled: bool = False
+    brightness_range: Tuple[float, float] = (0.8, 1.2)
+    contrast_range: Tuple[float, float] = (0.8, 1.2)
+    saturation_range: Tuple[float, float] = (0.5, 1.5)
+    hue_range: Tuple[float, float] = (-0.05, 0.05)
+    # White balance temperature (warm/cool) simulated by channel scaling
+    # > 1.0 means boost Red (warm), < 1.0 means boost Blue (cool)
+    warmth_range: Tuple[float, float] = (0.8, 1.2)
+
+
+@dataclass(slots=True)
+class TextOverlayParams:
+    """Parameters for adding random text distractors."""
+
+    enabled: bool = False
+    count_range: Tuple[int, int] = (1, 5)
+    font_scale_range: Tuple[float, float] = (0.5, 1.5)
+    thickness_range: Tuple[int, int] = (1, 2)
+    color_jitter: int = 50
+    opacity_range: Tuple[float, float] = (0.7, 1.0) # Text isn't always perfectly black
+    clear_mask: bool = True # If True, text pixels in mask become Background (0)
+
+
+@dataclass(slots=True)
 class PipelineConfig:
     """Top-level configuration for the crop generation pipeline."""
 
@@ -174,3 +201,5 @@ class PipelineConfig:
     occlusion: OcclusionParams = field(default_factory=OcclusionParams)
     stain: StainParams = field(default_factory=StainParams)
     moire: MoireParams = field(default_factory=MoireParams)
+    color_aug: ColorAugParams = field(default_factory=ColorAugParams)
+    text_overlay: TextOverlayParams = field(default_factory=TextOverlayParams)

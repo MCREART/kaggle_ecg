@@ -12,6 +12,7 @@ import json
 
 from .config import (
     BlurParams,
+    ColorAugParams,
     CropParams,
     GrayParams,
     MoireParams,
@@ -19,16 +20,19 @@ from .config import (
     OcclusionParams,
     PipelineConfig,
     StainParams,
+    TextOverlayParams,
     TransformParams,
     WrinkleParams,
 )
 from .blur_utils import apply_blur
+from .color_utils import apply_color_augmentations
 from .grayscale_utils import apply_grayscale
 from .mask_utils import resize_skeleton, zhang_suen_thinning
 from .moire_utils import apply_moire
 from .noise_utils import apply_noise
 from .occlusion_utils import apply_occlusions
 from .stain_utils import apply_stains
+from .text_utils import apply_text_overlay
 from .transformations import TransformResult, apply_transform
 from .wrinkles import apply_wrinkles
 from . import gpu_ops
@@ -124,7 +128,7 @@ def _warp_additional_mask(mask: np.ndarray, transform: TransformResult) -> np.nd
             mask,
             transform.matrix,
             (width, height),
-            flags=cv2.INTER_NEAREST,
+            flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         )
@@ -133,7 +137,7 @@ def _warp_additional_mask(mask: np.ndarray, transform: TransformResult) -> np.nd
             mask,
             transform.matrix,
             (width, height),
-            flags=cv2.INTER_NEAREST,
+            flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         )
@@ -515,6 +519,14 @@ def run_pipeline(config: PipelineConfig) -> None:
     if coverage_mask is not None:
         coverage_mask_transformed = _warp_additional_mask(coverage_mask, transform_result)
 
+    # Apply text overlay (distractors) BEFORE wrinkles
+    transformed_image, transformed_mask = apply_text_overlay(
+        transformed_image,
+        transformed_mask,
+        config.text_overlay,
+        rng=random
+    )
+
     wrinkle_result = apply_wrinkles(
         transformed_image,
         transformed_mask,
@@ -528,7 +540,8 @@ def run_pipeline(config: PipelineConfig) -> None:
     noised_image = apply_noise(blurred_image, config.noise)
     occluded_image = apply_occlusions(noised_image, config.occlusion)
     stained_image = apply_stains(occluded_image, config.stain)
-    moire_image = apply_moire(stained_image, config.moire)
+    color_aug_image = apply_color_augmentations(stained_image, config.color_aug)
+    moire_image = apply_moire(color_aug_image, config.moire)
     gray_image = apply_grayscale(moire_image, config.gray)
 
     image_for_crops = gray_image
@@ -595,6 +608,8 @@ def generate_transformed_crops(
     noise: NoiseParams | None = None,
     occlusion: OcclusionParams | None = None,
     stain: StainParams | None = None,
+    color_aug: ColorAugParams | None = None,
+    text_overlay: TextOverlayParams | None = None,
     seed: int | None = None,
 ) -> None:
     config = PipelineConfig(
@@ -612,6 +627,9 @@ def generate_transformed_crops(
         noise=noise or NoiseParams(),
         occlusion=occlusion or OcclusionParams(),
         stain=stain or StainParams(),
+
+        color_aug=color_aug or ColorAugParams(),
+        text_overlay=text_overlay or TextOverlayParams(),
     )
     retries = max(1, config.crop.global_retry_attempts)
     original_allow_oob = config.crop.allow_out_of_bounds

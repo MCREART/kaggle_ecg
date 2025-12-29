@@ -6,7 +6,7 @@ import numpy as np
 def zhang_suen_thinning(binary: np.ndarray) -> np.ndarray:
     """Perform Zhang-Suen thinning to obtain a 1-pixel skeleton."""
 
-    img = binary.copy()
+    img = (binary > 0).astype(np.uint8)
     changing = True
     rows, cols = img.shape
 
@@ -76,7 +76,7 @@ def zhang_suen_thinning(binary: np.ndarray) -> np.ndarray:
             for i, j in to_remove:
                 img[i, j] = 0
 
-    return img
+    return img * 255
 
 
 def resize_skeleton(binary: np.ndarray, out_size: int) -> np.ndarray:

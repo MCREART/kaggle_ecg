@@ -230,11 +230,11 @@ def _save_positive_sample(
         # Color Augmentation
         color_aug = ColorAugParams(
              enabled=True,
-             brightness_range=(0.85, 1.15),
-             contrast_range=(0.85, 1.15),
-             saturation_range=(0.6, 1.4),
-             hue_range=(-0.02, 0.02),
-             warmth_range=(0.8, 1.2),
+             brightness_range=(0.6, 1.15),
+             contrast_range=(0.7, 1.3),
+             saturation_range=(0.3, 1.5),
+             hue_range=(-0.05, 0.05),
+             warmth_range=(0.7, 1.3),
         )
 
         # Text Overlay Distractors

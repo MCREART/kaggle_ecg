@@ -20,8 +20,24 @@ GEN_SRC = REPO_ROOT / "ecg_generator_with_train_src"
 if str(GEN_SRC) not in sys.path:
     sys.path.insert(0, str(GEN_SRC))
 
-from gen_ecg_page import RenderOptions, render_ecg_page_from_csv  # noqa: E402
+from gen_ecg_page import (
+    RenderOptions, 
+    render_ecg_page, 
+    detect_grid, 
+    load_leads_from_csv, 
+    infer_sampling_rate
+)
 from gen_wave_mask import render_wave_mask  # noqa: E402
+
+# Add src to path for color utils
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from crop_generator.color_utils import apply_color_augmentations
+from crop_generator.config import ColorAugParams
+import numpy as np
+import cv2
 
 try:
     from tqdm import tqdm
@@ -82,10 +98,7 @@ def load_fs_lookup(meta_path: Path | None) -> Mapping[str, float]:
     return mapping
 
 
-from PIL import ImageDraw, ImageFont
-import random
-
-from PIL import ImageDraw, ImageFont
+from PIL import ImageDraw, ImageFont, Image
 import random
 import datetime
 
@@ -200,13 +213,48 @@ def render_single(
 
     fs_override = fs_lookup.get(record_id)
     rng_seed = hash(record_id) & 0xFFFFFFFF
-    image = render_ecg_page_from_csv(
-        csv_path,
-        grid_path,
+    
+    # --- Manual Render Pipeline with Grid Augmentation ---
+    # 1. Load Leads & FS
+    leads = load_leads_from_csv(csv_path)
+    fs = fs_override if fs_override and fs_override > 0 else infer_sampling_rate(leads)
+    
+    # 2. Load & Augment Grid
+    # Load raw grid image (usually clean red grid)
+    # We load it via detect_grid to get the GridSpec, then modify the image in-place
+    grid_spec = detect_grid(grid_path)
+    
+    # Convert PIL -> CV2 (BGR)
+    grid_bgr = cv2.cvtColor(np.array(grid_spec.image), cv2.COLOR_RGB2BGR)
+    
+    # Define Wide Ranging Color Augmentation (Deep Red, Brown, Faded)
+    # Using the enhanced ranges discussed previously
+    aug_params = ColorAugParams(
+        enabled=True,
+        brightness_range=(0.6, 1.3),
+        contrast_range=(0.7, 1.3),
+        saturation_range=(0.3, 1.5),
+        hue_range=(-0.05, 0.05),
+        warmth_range=(0.7, 1.3),
+    )
+    
+    # Apply Augmentation
+    grid_aug_bgr = apply_color_augmentations(grid_bgr, aug_params)
+    
+    # Convert back to PIL
+    grid_aug_pil = Image.fromarray(cv2.cvtColor(grid_aug_bgr, cv2.COLOR_BGR2RGB))
+    
+    # Update GridSpec with augmented image
+    object.__setattr__(grid_spec, 'image', grid_aug_pil)
+    
+    # 3. Render Page
+    image = render_ecg_page(
+        leads,
+        fs,
+        grid_spec,
         options=options,
-        header_text="", # Disable default center header
-        rng_seed=rng_seed,
-        fs_override=fs_override,
+        header_text="", # Disable default header
+        rng=random.Random(rng_seed)
     )
     
     # Add structured synthetic metadata

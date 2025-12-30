@@ -1,5 +1,11 @@
+from __future__ import annotations
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+
+"""
+对整幅高分辨率心电图照片采用多种 tile 尺寸滑窗推理，并将结果拼回原图。
+包含自动分辨率调整和自动方向矫正功能。
+"""
 
 """
 对整幅高分辨率心电图照片采用多种 tile 尺寸滑窗推理，并将结果拼回原图。
@@ -12,8 +18,6 @@ python scripts/apply_model_multi_tiles.py \
     --tile-sizes 128 256 512 1024 \
     --overlap-frac 0.125
 """
-
-from __future__ import annotations
 
 import argparse
 import json
@@ -58,6 +62,17 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         type=float,
         default=0.5,
         help="二值掩码阈值",
+    )
+    parser.add_argument(
+        "--resize-width",
+        type=int,
+        default=2200,
+        help="如果输入图像宽度超过此值，则自动缩放到此宽度进行推理，结果再放回原尺寸（0 表示不缩放）",
+    )
+    parser.add_argument(
+        "--gray",
+        action="store_true",
+        help="是否在推理前将输入图像转为灰度图（然后再转回3通道以匹配模型输入）",
     )
     parser.add_argument(
         "--device",
@@ -186,6 +201,7 @@ def tile_inference(
     overlap: int,
     device: torch.device,
     num_classes: int,
+    use_gray: bool = False,
 ) -> np.ndarray:
     h, w = image.shape[:2]
     stride = tile_size - overlap
@@ -213,6 +229,11 @@ def tile_inference(
     for y in range(0, padded.shape[0] - tile_size + 1, stride):
         for x in range(0, padded.shape[1] - tile_size + 1, stride):
             tile = padded[y : y + tile_size, x : x + tile_size]
+            
+            if use_gray:
+                tile_gray = cv2.cvtColor(tile, cv2.COLOR_BGR2GRAY)
+                tile = cv2.cvtColor(tile_gray, cv2.COLOR_GRAY2BGR)
+                
             tensor = preprocess_image(tile).to(device)
             with torch.no_grad():
                 logits = model(tensor)
@@ -277,20 +298,115 @@ def main(argv: Iterable[str] | None = None) -> None:
             print(f"[WARN] 跳过无法读取的文件: {path}")
             continue
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        original_h, original_w = image_rgb.shape[:2]
+        
+        # Check resizing
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        
+        # --- 1. Vertical -> Horizontal Check ---
+        h, w = image_rgb.shape[:2]
+        is_vertical = h > w
+        if is_vertical:
+            print(f"[INFO] 图像为竖向 ({w}x{h})，逆时针旋转90度为横向...")
+            # Rotate 90 deg Counter-Clockwise (or Clockwise, doesn't matter much as long as it becomes horizontal)
+            # Standard is usually Counter-Clockwise to verify. Let's stick to valid OpenCV consts.
+            # ROTATE_90_COUNTERCLOCKWISE
+            image_rgb = cv2.rotate(image_rgb, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        
+        # Update H, W after potential rotation
+        original_h, original_w = image_rgb.shape[:2]
+        
+        # --- 2. Resize Logic ---
+        # Check resizing (Always resize to standard width for inference stability)
+        resize_scale = 1.0
+        process_image = image_rgb
+        if args.resize_width > 0 and original_w > args.resize_width:
+            resize_scale = args.resize_width / float(original_w)
+            new_h = int(original_h * resize_scale)
+            # Use INTER_AREA for shrinking to avoid aliasing
+            process_image = cv2.resize(image_rgb, (args.resize_width, new_h), interpolation=cv2.INTER_AREA)
+            print(f"[INFO] Auto-resizing {path.name}: {original_w}x{original_h} -> {args.resize_width}x{new_h}")
 
         for tile_size in args.tile_sizes:
             overlap = max(1, int(tile_size * args.overlap_frac))
             overlap = min(overlap, tile_size - 1)
 
-            # (H, W, C)
-            prob_map_all = tile_inference(
+            # --- 3. First Inference ---
+            prob_map_processed = tile_inference(
                 model,
-                image_rgb,
+                process_image,
                 tile_size=tile_size,
                 overlap=overlap,
                 device=device,
-                num_classes=classes
+                num_classes=classes,
+                use_gray=args.gray,
             )
+            
+            # --- 4. Orientation Check (Upright vs Upside Down) ---
+            # Check wave distribution (Label 2) in Top vs Bottom half
+            if classes > 2: # Need wave class
+                pred_temp = np.argmax(prob_map_processed, axis=-1)
+                ph, pw = pred_temp.shape
+                mid_y = ph // 2
+                # Count wave pixels
+                top_waves = np.sum(pred_temp[:mid_y, :] == 2)
+                bot_waves = np.sum(pred_temp[mid_y:, :] == 2)
+                
+                # Logic: Waveforms (Rhythm strips) are usually at the bottom.
+                # If Top has significantly MORE waves than Bottom, or if the distribution is suspicious, check.
+                # Wait, standard 12-lead has waves everywhere. But Rhythm strip is Long Lead II at bottom.
+                # If Upside Down, the "Rhythm Strip" might be at the top? 
+                # Or simply: Text headers are at top (BG), Rhythm at bottom (Wave).
+                # Actually, 12-lead is dense waves. But usually bottom row is continuous.
+                # Let's use user's logic: "看哪个区域mask2更多" (See which area has more Mask 2).
+                # User says: "横着的肯定只有两种情况... 看哪个区域mask2更多"
+                # Usually ECG has dense waves. If upside down, the "dense" part might be top?
+                # Actually bottom rhythm strip is usually the densest horizontally (full width).
+                # Top rows are split columns.
+                # So Bottom Half usually has MORE Wave pixels than Top Half?
+                # Calculating...
+                # Top: 3 rows of short leads.
+                # Bottom: 1 row of long lead.
+                # Pixel count might be similar.
+                # Let's look at DISTRIBUTION.
+                # User suggestion: "看哪个区域mask2更多".
+                # If Top > Bottom => Upside Down? (Assuming bottom should have more?)
+                # Or does user imply "Rhythm strip is at bottom, so bottom should have waves"?
+                # Let's assume correct orientation has MORE waves at bottom (due to long strip).
+                # So if Top > Bottom * 1.2, it's likely Upside Down.
+                
+                ratio = top_waves / (bot_waves + 1e-5)
+                print(f"[INFO] Orientation Check: Top Wave={top_waves}, Bot Wave={bot_waves}, Ratio={ratio:.2f}")
+                
+                if ratio > 1.2: # Tune this threshold
+                    print(f"[INFO] 检测到倒置 (Top > Bot)，正在旋转180度重试...")
+                    # Rotate Original 180
+                    image_rgb = cv2.rotate(image_rgb, cv2.ROTATE_180)
+                    # Rotate Process 180 (no need to resize again, just rotate the smaller one)
+                    process_image = cv2.rotate(process_image, cv2.ROTATE_180)
+                    
+                    # Re-Inference
+                    prob_map_processed = tile_inference(
+                        model,
+                        process_image,
+                        tile_size=tile_size,
+                        overlap=overlap,
+                        device=device,
+                        num_classes=classes,
+                        use_gray=args.gray,
+                    )
+            
+            # --- 5. Resize result back ---
+
+            
+            # Resize back if needed
+            if resize_scale != 1.0:
+                 prob_map_all = cv2.resize(prob_map_processed, (original_w, original_h), interpolation=cv2.INTER_LINEAR)
+                 # Ensure we have correct shape if resize squeezed dimensions (rare for linear but good to check)
+                 if prob_map_all.ndim == 2:
+                     prob_map_all = prob_map_all[..., None]
+            else:
+                 prob_map_all = prob_map_processed
             
             # Save raw probability maps? Maybe too big. 
             # Let's save the final prediction index map.

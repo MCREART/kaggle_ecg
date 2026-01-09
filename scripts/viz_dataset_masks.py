@@ -43,12 +43,17 @@ def visualize_masks(mask_dir, output_dir, count=5):
         viz_mask = np.zeros((h, w, 3), dtype=np.uint8)
         
         # Color mapping (BGR for OpenCV)
-        # 0: Background -> Black (0,0,0)
-        # 1: Grid -> Red (0,0,255)
-        # 2: Wave -> Green (0,255,0)
+        # Color mapping (BGR for OpenCV)
+        # 0: Background -> Black
+        # 1: H-Line -> Red (0, 0, 255)
+        # 2: V-Line -> Blue (255, 0, 0)
+        # 3: Integration -> Yellow (0, 255, 255)
+        # 4: Wave -> Green (0, 255, 0)
         
-        viz_mask[mask == 1] = [0, 0, 255]
-        viz_mask[mask == 2] = [0, 255, 0]
+        viz_mask[mask == 1] = [0, 0, 255]      # Red
+        viz_mask[mask == 2] = [255, 0, 0]      # Blue
+        viz_mask[mask == 3] = [0, 255, 255]    # Yellow
+        viz_mask[mask == 4] = [0, 255, 0]      # Green
         
         # Blend/Resize if needed (assuming sizes match)
         if img.shape[:2] != mask.shape:

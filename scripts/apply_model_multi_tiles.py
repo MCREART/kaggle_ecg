@@ -260,17 +260,26 @@ def tile_inference(
 
 def overlay_classes(image: np.ndarray, pred_map: np.ndarray, alpha: float = 0.5) -> np.ndarray:
     """
-    pred_map: (H, W) containing class indices (0, 1, 2)
+    pred_map: (H, W) containing class indices (0..4)
+    0: BG, 1: H-Line, 2: V-Line, 3: Inter, 4: Wave
     """
     overlay = image.copy()
     
-    # Class 1: Grid (Red)
-    mask_grid = (pred_map == 1)
-    overlay[mask_grid] = (overlay[mask_grid] * (1 - alpha) + np.array([255, 0, 0]) * alpha).astype(np.uint8)
+    # Class 1: H-Line (Red)
+    mask_h = (pred_map == 1)
+    overlay[mask_h] = (overlay[mask_h] * (1 - alpha) + np.array([255, 0, 0]) * alpha).astype(np.uint8)
     
-    # Class 2: Wave (Green)
-    mask_wave = (pred_map == 2)
-    overlay[mask_wave] = (overlay[mask_wave] * (1 - alpha) + np.array([0, 255, 0]) * alpha).astype(np.uint8)
+    # Class 2: V-Line (Blue)
+    mask_v = (pred_map == 2)
+    overlay[mask_v] = (overlay[mask_v] * (1 - alpha) + np.array([0, 0, 255]) * alpha).astype(np.uint8)
+
+    # Class 3: Intersection (Yellow)
+    mask_i = (pred_map == 3)
+    overlay[mask_i] = (overlay[mask_i] * (1 - alpha) + np.array([255, 255, 0]) * alpha).astype(np.uint8)
+    
+    # Class 4: Wave (Green)
+    mask_w = (pred_map == 4)
+    overlay[mask_w] = (overlay[mask_w] * (1 - alpha) + np.array([0, 255, 0]) * alpha).astype(np.uint8)
     
     return overlay
 
@@ -287,7 +296,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     image_paths = sorted(
-        [p for p in args.input_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+        [p for p in args.input_dir.rglob("*") if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
     )
     if not image_paths:
         raise FileNotFoundError(f"{args.input_dir} 中未找到 PNG/JPG 图像")
@@ -308,22 +317,17 @@ def main(argv: Iterable[str] | None = None) -> None:
         is_vertical = h > w
         if is_vertical:
             print(f"[INFO] 图像为竖向 ({w}x{h})，逆时针旋转90度为横向...")
-            # Rotate 90 deg Counter-Clockwise (or Clockwise, doesn't matter much as long as it becomes horizontal)
-            # Standard is usually Counter-Clockwise to verify. Let's stick to valid OpenCV consts.
-            # ROTATE_90_COUNTERCLOCKWISE
             image_rgb = cv2.rotate(image_rgb, cv2.ROTATE_90_COUNTERCLOCKWISE)
         
         # Update H, W after potential rotation
         original_h, original_w = image_rgb.shape[:2]
         
         # --- 2. Resize Logic ---
-        # Check resizing (Always resize to standard width for inference stability)
         resize_scale = 1.0
         process_image = image_rgb
         if args.resize_width > 0 and original_w > args.resize_width:
             resize_scale = args.resize_width / float(original_w)
             new_h = int(original_h * resize_scale)
-            # Use INTER_AREA for shrinking to avoid aliasing
             process_image = cv2.resize(image_rgb, (args.resize_width, new_h), interpolation=cv2.INTER_AREA)
             print(f"[INFO] Auto-resizing {path.name}: {original_w}x{original_h} -> {args.resize_width}x{new_h}")
 
@@ -343,46 +347,24 @@ def main(argv: Iterable[str] | None = None) -> None:
             )
             
             # --- 4. Orientation Check (Upright vs Upside Down) ---
-            # Check wave distribution (Label 2) in Top vs Bottom half
-            if classes > 2: # Need wave class
+            # Check wave distribution in Top vs Bottom half
+            # Wave is now Class 4 (was 2)
+            wave_idx = 4 if classes >= 5 else 2
+            
+            if classes > 2: 
                 pred_temp = np.argmax(prob_map_processed, axis=-1)
                 ph, pw = pred_temp.shape
                 mid_y = ph // 2
                 # Count wave pixels
-                top_waves = np.sum(pred_temp[:mid_y, :] == 2)
-                bot_waves = np.sum(pred_temp[mid_y:, :] == 2)
-                
-                # Logic: Waveforms (Rhythm strips) are usually at the bottom.
-                # If Top has significantly MORE waves than Bottom, or if the distribution is suspicious, check.
-                # Wait, standard 12-lead has waves everywhere. But Rhythm strip is Long Lead II at bottom.
-                # If Upside Down, the "Rhythm Strip" might be at the top? 
-                # Or simply: Text headers are at top (BG), Rhythm at bottom (Wave).
-                # Actually, 12-lead is dense waves. But usually bottom row is continuous.
-                # Let's use user's logic: "看哪个区域mask2更多" (See which area has more Mask 2).
-                # User says: "横着的肯定只有两种情况... 看哪个区域mask2更多"
-                # Usually ECG has dense waves. If upside down, the "dense" part might be top?
-                # Actually bottom rhythm strip is usually the densest horizontally (full width).
-                # Top rows are split columns.
-                # So Bottom Half usually has MORE Wave pixels than Top Half?
-                # Calculating...
-                # Top: 3 rows of short leads.
-                # Bottom: 1 row of long lead.
-                # Pixel count might be similar.
-                # Let's look at DISTRIBUTION.
-                # User suggestion: "看哪个区域mask2更多".
-                # If Top > Bottom => Upside Down? (Assuming bottom should have more?)
-                # Or does user imply "Rhythm strip is at bottom, so bottom should have waves"?
-                # Let's assume correct orientation has MORE waves at bottom (due to long strip).
-                # So if Top > Bottom * 1.2, it's likely Upside Down.
+                top_waves = np.sum(pred_temp[:mid_y, :] == wave_idx)
+                bot_waves = np.sum(pred_temp[mid_y:, :] == wave_idx)
                 
                 ratio = top_waves / (bot_waves + 1e-5)
-                print(f"[INFO] Orientation Check: Top Wave={top_waves}, Bot Wave={bot_waves}, Ratio={ratio:.2f}")
+                # print(f"[INFO] Orientation Check (WaveIdx={wave_idx}): Top={top_waves}, Bot={bot_waves}, Ratio={ratio:.2f}")
                 
-                if ratio > 1.2: # Tune this threshold
+                if ratio > 1.2:
                     print(f"[INFO] 检测到倒置 (Top > Bot)，正在旋转180度重试...")
-                    # Rotate Original 180
                     image_rgb = cv2.rotate(image_rgb, cv2.ROTATE_180)
-                    # Rotate Process 180 (no need to resize again, just rotate the smaller one)
                     process_image = cv2.rotate(process_image, cv2.ROTATE_180)
                     
                     # Re-Inference
@@ -397,38 +379,32 @@ def main(argv: Iterable[str] | None = None) -> None:
                     )
             
             # --- 5. Resize result back ---
-
-            
-            # Resize back if needed
             if resize_scale != 1.0:
                  prob_map_all = cv2.resize(prob_map_processed, (original_w, original_h), interpolation=cv2.INTER_LINEAR)
-                 # Ensure we have correct shape if resize squeezed dimensions (rare for linear but good to check)
                  if prob_map_all.ndim == 2:
                      prob_map_all = prob_map_all[..., None]
             else:
                  prob_map_all = prob_map_processed
             
-            # Save raw probability maps? Maybe too big. 
-            # Let's save the final prediction index map.
+            # Save final prediction
             if classes > 1:
-                # Multi-class: argmax
                 pred_map = np.argmax(prob_map_all, axis=-1) # (H, W)
                 
                 # Overlay
                 overlay_img = overlay_classes(image_rgb, pred_map)
                 
-                # Save visualization
                 cv2.imwrite(
                     str(output_dir / f"{path.stem}_t{tile_size}_overlay.png"),
                     cv2.cvtColor(overlay_img, cv2.COLOR_RGB2BGR),
                 )
                 
-                # Save prediction index mask (0, 1, 2) properly scaled for visibility or raw
-                # For visibility: 0->0, 1->127, 2->255? Or just raw indices
-                # Let's save colored mask for verify
+                # Save colored mask for verify
                 colored_mask = np.zeros_like(image_rgb)
-                colored_mask[pred_map == 1] = [255, 0, 0] # Red Grid
-                colored_mask[pred_map == 2] = [0, 255, 0] # Green Wave
+                colored_mask[pred_map == 1] = [255, 0, 0]   # Red (H-Line)
+                colored_mask[pred_map == 2] = [0, 0, 255]   # Blue (V-Line)
+                colored_mask[pred_map == 3] = [255, 255, 0] # Yellow (Inter)
+                colored_mask[pred_map == 4] = [0, 255, 0]   # Green (Wave)
+                
                 cv2.imwrite(
                     str(output_dir / f"{path.stem}_t{tile_size}_mask_vis.png"),
                     cv2.cvtColor(colored_mask, cv2.COLOR_RGB2BGR),

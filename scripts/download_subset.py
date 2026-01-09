@@ -16,46 +16,81 @@ FILE_LIST_PATH = "all_files.txt"
 OUTPUT_ROOT = "downloaded_subset"
 
 def main():
-    if not os.path.exists(FILE_LIST_PATH):
-        print(f"File list {FILE_LIST_PATH} not found. Please generate it first.")
-        return
-
-    print("Parsing file list...")
-    id_to_files = defaultdict(list)
-    
-    with open(FILE_LIST_PATH, "r") as f:
-        # Skip header if any (Kaggle CLI output often has headers)
-        # The output format is usually: name, size, creationDate
-        # We need the first column.
-        lines = f.readlines()
-        
-    for line in lines:
-        parts = line.split()
-        if not parts:
-            continue
-        filename = parts[0]
-        
-        # We look for train/<ID>/...
-        if filename.startswith("train/") and "/" in filename:
-            # Structure: train/ID/file
-            seg = filename.split("/")
-            if len(seg) >= 3:
-                sample_id = seg[1]
-                id_to_files[sample_id].append(filename)
-
-    print(f"Found {len(id_to_files)} unique IDs.")
-    
-    if len(id_to_files) < 10:
-        print("Not enough IDs found to sample 10. Downloading all.")
-        selected_ids = list(id_to_files.keys())
-    else:
-        selected_ids = random.sample(list(id_to_files.keys()), 10)
-        
-    print(f"Selected 10 IDs: {selected_ids}")
-    
     # Initialize API
     api = KaggleApi()
     api.authenticate()
+    
+    print("Fetching file list via API (handling pagination)...")
+    id_to_files = defaultdict(list)
+    unique_ids = set()
+    needed_count = 50  # Target number of samples
+    
+    # Iterate pages usually implicitly or manually. 
+    # For competition_list_files, valid return is list of File objects.
+    # We loop until we have enough IDs.
+    
+    MAX_PAGES = 50
+    page_count = 0
+    token = None
+    
+    while len(unique_ids) < needed_count and page_count < MAX_PAGES:
+        print(f"Fetching page {page_count+1} (token={token if token else 'None'})...")
+        try:
+            kwargs = {}
+            if token:
+                kwargs['page_token'] = token
+            files_resp = api.competition_list_files(COMPETITION, **kwargs)
+        except Exception as e:
+            print(f"Error fetching page: {e}")
+            break
+            
+        # Handle ApiListDataFilesResponse or list
+        if hasattr(files_resp, 'files'):
+            files_list = files_resp.files
+        else:
+            files_list = files_resp
+            
+        if not files_list:
+            print("No more files returned.")
+            break
+            
+        print(f"  Page returned {len(files_list)} items.")
+        
+        for f in files_list:
+            filename = str(f)
+            if hasattr(f, 'name'):
+                filename = f.name
+                
+            if filename.startswith("train/") and "/" in filename:
+                seg = filename.split("/")
+                if len(seg) >= 3:
+                    sample_id = seg[1]
+                    id_to_files[sample_id].append(filename)
+                    unique_ids.add(sample_id)
+        
+        print(f"  Currently have {len(unique_ids)} unique IDs.")
+        
+        # Update token for next page
+        # Try common attribute names for next page token
+        token = None
+        if hasattr(files_resp, 'nextPageToken') and files_resp.nextPageToken:
+             token = files_resp.nextPageToken
+        elif hasattr(files_resp, 'next_page_token') and files_resp.next_page_token:
+             token = files_resp.next_page_token
+             
+        if not token:
+             print("No next page token found. End of list.")
+             break
+             
+        page_count += 1
+    
+    if len(unique_ids) < needed_count:
+        print(f"Not enough IDs found to sample {needed_count}. Downloading all {len(unique_ids)}.")
+        selected_ids = list(unique_ids)
+    else:
+        selected_ids = random.sample(list(unique_ids), needed_count)
+        
+    print(f"Selected {len(selected_ids)} IDs: {selected_ids}")
     
     # Download
     print("Starting download...")

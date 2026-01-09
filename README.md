@@ -37,25 +37,25 @@ cd ori_csv && tar -zxvf train-csvs.tar.gz && cd ..
 
 ```bash
 python scripts/batch_render_waveforms.py \
-    --csv-root ori_csv/train-csvs \
+    --csv-root ori_csv/train \
     --grid ecg_generator_with_train_src/export/clean_ecg_grid.png \
     --image-dir data/wave_images \
     --mask-dir data/wave_masks
 ```
 
-### 2.3 构建训练数据集 (3分类)
+### 2.3 构建训练数据集 (5分类)
 将波形与背景网格混合，生成最终的训练样本。
 *   **Target**: `dataset_grid_wave_mix`
-*   **Classes**: 0 (背景), 1 (网格), 2 (波形)
+*   **Classes**: 0 (BG), 1 (H-Line), 2 (V-Line), 3 (Inter), 4 (Wave)
 
 ```bash
 python scripts/build_dataset.py \
     --input-root ori_csv/train \
     --mask image_data/complete_mask.png \
     --wave-root data/wave_images \
+    --wave-mask-root data/wave_masks \
     --output-root dataset_grid_wave_mix \
-    --overwrite \
-
+    --overwrite
 ```
 
 ### 2.4 下载样本数据 (Utilities)

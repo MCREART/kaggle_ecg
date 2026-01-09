@@ -344,6 +344,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="可选：包含波形整页 PNG 的根目录（会递归搜索 PNG 并使用对应 _mask.png 作为波形掩码）。",
     )
     parser.add_argument(
+        "--wave-mask-root",
+        type=Path,
+        default=None,
+        help="可选：指定波形掩码所在的根目录。如果未指定，默认会在 --wave-root 下寻找 _mask.png。",
+    )
+    parser.add_argument(
         "--wave-min-coverage",
         type=float,
         default=0.05,
@@ -412,10 +418,36 @@ def main(argv: Sequence[str] | None = None) -> None:
         for path in wave_images:
             if path.stem.endswith("_mask"):
                 continue
-            coverage_mask = path.with_name(f"{path.stem}_mask{path.suffix}")
-            if not coverage_mask.exists():
-                print(f"警告：{coverage_mask} 不存在，跳过波形样本 {path.name}")
-                continue
+            
+            # Determine mask path
+            if args.wave_mask_root:
+                # Expect mask to have same name or suffix in the separate mask root
+                # Try explicit structure match or just flat filename match
+                # Strategy: mirror relative path, or just filename
+                # Simplified strategy: If mask root provided, assume flat or mirrored structure for filename check.
+                # Let's try finding by filename in mask root first.
+                expected_mask_name = f"{path.stem}_mask{path.suffix}"
+                
+                # Check 1: direct mapping in mask root
+                candidate = args.wave_mask_root / expected_mask_name
+                if not candidate.exists():
+                     # Check 2: maybe relative path from wave root?
+                     try:
+                        rel = path.relative_to(args.wave_root)
+                        candidate = args.wave_mask_root / rel.parent / expected_mask_name
+                     except ValueError:
+                        pass
+                
+                if not candidate.exists():
+                     print(f"警告：在 {args.wave_mask_root} 中未找到对应的掩码 {expected_mask_name}，跳过 {path.name}")
+                     continue
+                coverage_mask = candidate
+            else:
+                coverage_mask = path.with_name(f"{path.stem}_mask{path.suffix}")
+                if not coverage_mask.exists():
+                    print(f"警告：{coverage_mask} 不存在，跳过波形样本 {path.name}")
+                    continue
+
             sources.append((path, args.mask, coverage_mask, wave_overrides.copy()))
 
     if not sources:
@@ -428,10 +460,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     masks_dir = args.output_root / "masks"
     tmp_root = args.tmp_dir or (args.output_root / "_tmp")
 
-    if args.output_root.exists() and not args.overwrite:
-        existing = list(args.output_root.glob("images/*.png"))
-        if existing:
-            raise FileExistsError(f"{args.output_root} 已包含数据，请使用 --overwrite 或清理目录。")
+    if args.output_root.exists():
+        if args.overwrite:
+            print(f"清理输出目录: {args.output_root}")
+            shutil.rmtree(args.output_root)
+        else:
+            existing = list(args.output_root.glob("images/*.png"))
+            if existing:
+                raise FileExistsError(f"{args.output_root} 已包含数据，请使用 --overwrite 或清理目录。")
 
     if args.samples_per_image > 0 and not args.mask.exists():
         raise FileNotFoundError(f"未找到掩码文件：{args.mask}")

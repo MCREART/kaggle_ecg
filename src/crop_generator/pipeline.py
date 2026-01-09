@@ -35,6 +35,7 @@ from .stain_utils import apply_stains
 from .text_utils import apply_text_overlay
 from .transformations import TransformResult, apply_transform
 from .wrinkles import apply_wrinkles
+from .grid_utils import detect_grid
 from . import gpu_ops
 
 
@@ -258,6 +259,9 @@ def _generate_single_crop(
     index: int,
     output_dir: Path,
     coverage_mask: np.ndarray | None = None,
+    grid_h_mask: np.ndarray | None = None,
+    grid_v_mask: np.ndarray | None = None,
+    grid_i_mask: np.ndarray | None = None,
 ) -> None:
     height, width = mask.shape
     coverage_source = coverage_mask if coverage_mask is not None else mask
@@ -457,21 +461,43 @@ def _generate_single_crop(
         final_chunk = np.where(resized_skel > 0, 1, 0).astype(np.uint8)
         return final_chunk
 
-    # Process Grid Mask (Label 1)
-    grid_processed = _process_chunk_mask(crop_mask, crop_params)
+    # Process Grid Masks
+    # Background=0, H-Line=1, V-Line=2, Inter=3, Wave=4
+    final_combined_mask = np.zeros((crop_params.out_size, crop_params.out_size), dtype=np.uint8)
+
+    # Note: 'crop_mask' passed to this function is the original binary grid mask.
+    # But now we have specific H/V/Intersection masks.
+    # We use those if available, otherwise fallback (though pipeline update guarantees availability).
+
+    if grid_h_mask is not None:
+        crop_h = grid_h_mask[y : y + rect_height, x : x + rect_width]
+        h_processed = _process_chunk_mask(crop_h, crop_params)
+        final_combined_mask[h_processed > 0] = 1
     
-    # Process Wave/Coverage Mask if available (Label 2)
+    if grid_v_mask is not None:
+        crop_v = grid_v_mask[y : y + rect_height, x : x + rect_width]
+        v_processed = _process_chunk_mask(crop_v, crop_params)
+        final_combined_mask[v_processed > 0] = 2
+
+    if grid_i_mask is not None:
+        crop_i = grid_i_mask[y : y + rect_height, x : x + rect_width]
+        i_processed = _process_chunk_mask(crop_i, crop_params)
+        final_combined_mask[i_processed > 0] = 3
+
+    # Fallback if specific masks are missing (should not happen with new logic)
+    if grid_h_mask is None and grid_v_mask is None:
+         grid_processed = _process_chunk_mask(crop_mask, crop_params)
+         final_combined_mask[grid_processed > 0] = 1  # Default to H-line or generic grid label? 
+         # Let's assume we always have components.
+    
+    # Process Wave/Coverage Mask if available (Label 4)
     wave_processed = None
     if coverage_mask is not None:
         crop_wave = coverage_mask[y : y + rect_height, x : x + rect_width]
         wave_processed = _process_chunk_mask(crop_wave, crop_params)
 
-    # Merge labels: 0=BG, 1=Grid, 2=Wave
-    # Priority: Wave (2) > Grid (1) > BG (0)
-    final_combined_mask = np.zeros((crop_params.out_size, crop_params.out_size), dtype=np.uint8)
-    final_combined_mask[grid_processed > 0] = 1
     if wave_processed is not None:
-        final_combined_mask[wave_processed > 0] = 2
+        final_combined_mask[wave_processed > 0] = 4
 
     output_dir.mkdir(parents=True, exist_ok=True)
     image_path = output_dir / f"crop_{index:02d}_img.png"
@@ -515,6 +541,49 @@ def run_pipeline(config: PipelineConfig) -> None:
     )
     transformed_image = transform_result.image
     transformed_mask = transform_result.mask
+    
+    # -------------------------------------------------------------------------
+    # Generate Semantic Grid Masks (H-Lines, V-Lines, Intersections)
+    # We do this on the TRANSFORMED image/mask to match the crop geometry.
+    # However, detecting grid on a wrapped/augmented image is hard.
+    # Strategy: Detect grid on ORIGINAL image, create 3 component masks, 
+    # then Transform/Warp them identically to the main mask.
+    # -------------------------------------------------------------------------
+    
+    # 1. Detect on original (clean) input
+    # Assuming 'mask' (the binary grid mask) aligns with 'image'
+    # -------------------------------------------------------------------------
+    # Load Pre-computed Semantic Grid Masks (H-Lines, V-Lines, Intersections)
+    # -------------------------------------------------------------------------
+    # Assumes they are in the same directory as the main mask_path (or image_data root)
+    # Convention: grid_h_mask.png, grid_v_mask.png, grid_i_mask.png in mask_path.parent
+    
+    mask_dir = config.mask_path.parent
+    
+    def _load_component_mask(name: str):
+         p = mask_dir / name
+         if not p.exists():
+             return None
+         m = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+         return m
+         
+    mask_h = _load_component_mask("grid_h_mask.png")
+    mask_v = _load_component_mask("grid_v_mask.png")
+    mask_i = _load_component_mask("grid_i_mask.png")
+    
+    if mask_h is None or mask_v is None or mask_i is None:
+         # Fallback to single mask if components missing (legacy mode)
+         # Or treat main mask as H-line/Generic
+         mask_h = mask.copy()
+         mask_v = None
+         mask_i = None
+
+    # Warp them
+    # Note: mask_v and mask_i might be None
+    mask_h_warped = _warp_additional_mask(mask_h, transform_result)
+    mask_v_warped = _warp_additional_mask(mask_v, transform_result) if mask_v is not None else None
+    mask_i_warped = _warp_additional_mask(mask_i, transform_result) if mask_i is not None else None
+
     coverage_mask_transformed = None
     if coverage_mask is not None:
         coverage_mask_transformed = _warp_additional_mask(coverage_mask, transform_result)
@@ -527,15 +596,38 @@ def run_pipeline(config: PipelineConfig) -> None:
         rng=random
     )
 
+    # Prepare extra masks for robust wrinkling
+    extra_masks_input = {}
+    if mask_h_warped is not None: extra_masks_input["h"] = mask_h_warped
+    if mask_v_warped is not None: extra_masks_input["v"] = mask_v_warped
+    if mask_i_warped is not None: extra_masks_input["i"] = mask_i_warped
+    
     wrinkle_result = apply_wrinkles(
         transformed_image,
         transformed_mask,
         config.wrinkle,
         extra_mask=coverage_mask_transformed,
+        extra_masks=extra_masks_input,
     )
     wrinkled_image = wrinkle_result.image
     wrinkled_mask = wrinkle_result.mask
     coverage_mask_wrinkled = wrinkle_result.extra_mask
+    
+    # Retrieve robustly wrinkled component masks
+    mask_h_final = wrinkle_result.extra_masks.get("h") if wrinkle_result.extra_masks else None
+    mask_v_final = wrinkle_result.extra_masks.get("v") if wrinkle_result.extra_masks else None
+    mask_i_final = wrinkle_result.extra_masks.get("i") if wrinkle_result.extra_masks else None
+    
+    # Fallback if wrinkle disabled (just use warped)
+    if not config.wrinkle.enabled:
+         mask_h_final = mask_h_warped
+         mask_v_final = mask_v_warped
+         mask_i_final = mask_i_warped
+         
+    # Optimization: Intersection is H & V, so compute fresh to ensure consistency
+    if mask_h_final is not None and mask_v_final is not None:
+        mask_i_final = cv2.bitwise_and(mask_h_final, mask_v_final)
+
     blurred_image = apply_blur(wrinkled_image, config.blur)
     noised_image = apply_noise(blurred_image, config.noise)
     occluded_image = apply_occlusions(noised_image, config.occlusion)
@@ -574,13 +666,23 @@ def run_pipeline(config: PipelineConfig) -> None:
         if coverage_for_crops is not None:
             coverage_for_crops = cv2.copyMakeBorder(
                 coverage_for_crops,
-                pad,
-                pad,
-                pad,
-                pad,
+                pad, pad, pad, pad,
                 borderType=cv2.BORDER_CONSTANT,
                 value=0,
             )
+        
+        # Pad component masks
+        def _pad_mask(m):
+             if m is None: return None
+             return cv2.copyMakeBorder(m, pad, pad, pad, pad, borderType=cv2.BORDER_CONSTANT, value=0)
+             
+        mask_h_for_crops = _pad_mask(mask_h_final)
+        mask_v_for_crops = _pad_mask(mask_v_final)
+        mask_i_for_crops = _pad_mask(mask_i_final)
+    else:
+        mask_h_for_crops = mask_h_final
+        mask_v_for_crops = mask_v_final
+        mask_i_for_crops = mask_i_final
 
     for idx in range(config.crop.count):
         _generate_single_crop(
@@ -590,6 +692,9 @@ def run_pipeline(config: PipelineConfig) -> None:
             idx,
             config.output_dir,
             coverage_mask=coverage_for_crops,
+            grid_h_mask=mask_h_for_crops,
+            grid_v_mask=mask_v_for_crops,
+            grid_i_mask=mask_i_for_crops,
         )
 
 

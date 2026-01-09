@@ -419,7 +419,13 @@ def evaluate(
         metrics["val_dice"] = final_dice
     else:
         # Multi-class breakdown
-        class_names = {0: "BG", 1: "Grid", 2: "Wave"}
+        class_names = {
+            0: "BG", 
+            1: "H-Line", 
+            2: "V-Line", 
+            3: "Inter", 
+            4: "Wave"
+        }
         total_correct = 0
         total_pixels = 0
         for c in range(num_classes):

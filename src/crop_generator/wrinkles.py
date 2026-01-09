@@ -28,6 +28,7 @@ class WrinkleResult:
     mask: np.ndarray
     waves: List[WrinkleWave]
     extra_mask: np.ndarray | None = None
+    extra_masks: dict[str, np.ndarray] | None = None
 
 
 def apply_wrinkles(
@@ -36,11 +37,12 @@ def apply_wrinkles(
     params: WrinkleParams,
     *,
     extra_mask: np.ndarray | None = None,
+    extra_masks: dict[str, np.ndarray] | None = None,
 ) -> WrinkleResult:
     """Warp the image/mask pair using wrinkle-like displacement fields."""
 
     if not params.enabled:
-        return WrinkleResult(image=image, mask=mask, waves=[], extra_mask=extra_mask)
+        return WrinkleResult(image=image, mask=mask, waves=[], extra_mask=extra_mask, extra_masks=extra_masks)
 
     height, width = mask.shape
     short_side = max(1, min(height, width))
@@ -117,8 +119,11 @@ def apply_wrinkles(
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
     )
-    _, warped_mask_bin = cv2.threshold(warped_mask_soft, 50, 255, cv2.THRESH_BINARY)
-    warped_mask = zhang_suen_thinning(warped_mask_bin.astype(np.uint8))
+    _, warped_mask = cv2.threshold(warped_mask_soft, 50, 255, cv2.THRESH_BINARY)
+    # Optimization: processing full-res thinning is too slow. 
+    # We output "thick" binary masks here and let the crop pipeline thin them later.
+    # warped_mask = zhang_suen_thinning(warped_mask_bin.astype(np.uint8))
+    
     warped_extra = None
     if extra_mask is not None:
         warped_extra = cv2.remap(
@@ -129,4 +134,29 @@ def apply_wrinkles(
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         )
-    return WrinkleResult(image=warped_image, mask=warped_mask, waves=waves, extra_mask=warped_extra)
+        
+    warped_extras = {}
+    if extra_masks is not None:
+        for k, v in extra_masks.items():
+            if v is None: continue
+            # Use same soft warp + threshold technique for robust lines
+            soft = cv2.remap(
+                v,
+                map_x,
+                map_y,
+                interpolation=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0
+            )
+            # Threshold to keep connected
+            _, binary = cv2.threshold(soft, 50, 255, cv2.THRESH_BINARY)
+            # Optimization: Skip thinning here.
+            warped_extras[k] = binary.astype(np.uint8)
+
+    return WrinkleResult(
+        image=warped_image, 
+        mask=warped_mask.astype(np.uint8), 
+        waves=waves, 
+        extra_mask=warped_extra, 
+        extra_masks=warped_extras
+    )

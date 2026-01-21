@@ -1,39 +1,39 @@
 # Kaggle ECG Analysis & Segmentation
 
-本项目用于生成合成 ECG 数据并训练分割模型（支持网格与波形的像素级分割），专为 TPU 环境优化。
+This project is used to generate synthetic ECG data and train segmentation models (supporting pixel-level segmentation of grids and waveforms), optimized for TPU environments.
 
-## 1. 环境配置 (TPU)
+## 1. Environment Configuration (TPU)
 
-在 TPU VM 上，必须安装支持 TPU 的 PyTorch 版本 (`torch_xla`)。
+On TPU VMs, a PyTorch version that supports TPU (`torch_xla`) must be installed.
 
 ```bash
-# 1. 卸载可能存在的非 TPU 版本 PyTorch
+# 1. Uninstall any existing non-TPU version of PyTorch
 pip uninstall -y torch torchvision
 
-# 2. 安装 TPU 版本的 PyTorch (v2.5.0)
+# 2. Install TPU version of PyTorch (v2.5.0)
 pip install torch~=2.5.0 torch_xla[tpu]~=2.5.0 torchvision -f https://storage.googleapis.com/libtpu-releases/index.html
 
-# 3. 安装其他依赖
+# 3. Install other dependencies
 pip install -r requirements.txt numpy
 ```
 
-## 2. 数据准备
+## 2. Data Preparation
 
-### 2.1 下载原始数据
-原始 CSV 数据存储在 GCS 上。
+### 2.1 Download Original Data
+Original CSV data is stored on GCS.
 
 ```bash
-# 确保已认证 gcloud auth login
-# 下载并解压数据到 /home/creart/kaggle_ecg/ori_csv
-bash scripts/prepare_original_data.sh  # (需自行编写或手动 gsutil cp)
-# 或者手动:
+# Ensure you are authenticated with gcloud auth login
+# Download and extract data to /home/creart/kaggle_ecg/ori_csv
+bash scripts/prepare_original_data.sh  # (You need to write this or use gsutil cp manually)
+# Or manually:
 mkdir -p ori_csv
 gsutil cp -r gs://tpu-research-01-ecg-data/kaggle_ecg/ori_csv/* ori_csv/
 cd ori_csv && tar -zxvf train-csvs.tar.gz && cd ..
 ```
 
-### 2.2 生成合成波形与掩码
-使用 `batch_render_waveforms.py` 批量生成波形图像和对应的波形掩码。
+### 2.2 Generate Synthetic Waveforms and Masks
+Use `batch_render_waveforms.py` to batch generate waveform images and corresponding waveform masks.
 
 ```bash
 python scripts/batch_render_waveforms.py \
@@ -43,8 +43,8 @@ python scripts/batch_render_waveforms.py \
     --mask-dir data/wave_masks
 ```
 
-### 2.3 构建训练数据集 (5分类)
-将波形与背景网格混合，生成最终的训练样本。
+### 2.3 Build Training Dataset (5 Classes)
+Mix waveforms with background grids to generate the final training samples.
 *   **Target**: `dataset_grid_wave_mix`
 *   **Classes**: 0 (BG), 1 (H-Line), 2 (V-Line), 3 (Inter), 4 (Wave)
 
@@ -58,56 +58,57 @@ python scripts/build_dataset.py \
     --overwrite
 ```
 
-### 2.4 下载样本数据 (Utilities)
+### 2.4 Download Sample Data (Utilities)
 
-如果需要下载少量真实数据用于测试或推理验证，可以使用 `scripts/download_subset.py`。
-该脚本会从 Kaggle 竞赛 `physionet-ecg-image-digitization` 中随机下载指定数量的样本。
+If you need to download a small amount of real data for testing or inference verification, you can use `scripts/download_subset.py`.
+This script will randomly download a specified number of samples from the Kaggle competition `physionet-ecg-image-digitization`.
 
-**使用示例：**
+**Usage Example:**
 ```bash
-# 下载 10 个随机样本到 downloaded_subset/ 目录
+# Download 10 random samples to the downloaded_subset/ directory
 python scripts/download_subset.py
 ```
 
-**依赖条件：**
-*   需要在 `~/.kaggle/kaggle.json` 配置好 Kaggle API Token。
-*   需要预先接受该竞赛的 Rules。
+**Prerequisites:**
+*   You need to configure the Kaggle API Token in `~/.kaggle/kaggle.json`.
+*   You need to accept the Rules of the competition in advance.
 
-## 3. 模型训练 (TPU)
+## 3. Model Training (TPU)
 
-使用 `experiment/train_tpu.py` 在 TPU 上进行多核并行训练。
+Use `experiment/train_tpu.py` for multi-core parallel training on TPU.
 
-### 3.1 关键特性
-*   **8 卡并行**: 自动检测并利用 8 个 TPU 核心。
-*   **自适应学习率**: 集成 `ReduceLROnPlateau`，当 Loss 不下降时自动降低 LR。
-*   **鲁棒性**: 包含 NaN 检查和自动重试机制。
+### 3.1 Key Features
+*   **8-Card Parallel**: Automatically detects and utilizes 8 TPU cores.
+*   **Adaptive Learning Rate**: Integrates `ReduceLROnPlateau`, automatically lowering LR when Loss stops decreasing.
+*   **Robustness**: Includes NaN checks and automatic retry mechanisms.
 
-### 3.2 启动训练
+### 3.2 Start Training
 
-**标准启动命令 (推荐)**:
+**Standard Start Command (Recommended)**:
 
 ```bash
-# 设置 TPU 设备环境
+# Set TPU device environment
 export PJRT_DEVICE=TPU
 
-# 启动训练
-# 默认使用 8 核心，配置文件对应 3 分类任务
+# Start training
+# Default uses 8 cores, config file corresponds to 3-class task
 python experiment/train_tpu.py --config experiment/configs/grid_wave_net.yaml
 ```
 
-**如遇 NaN 不稳定**:
-如果在训练初期遇到 `train_loss: nan`，可以尝试关闭 BFloat16 加速（虽然这会降低速度）：
+**If NaN Instability Occurs**:
+If `train_loss: nan` is encountered early in training, try disabling BFloat16 acceleration (although this will reduce speed):
 
 ```bash
 unset XLA_USE_BF16
 python experiment/train_tpu.py --config experiment/configs/grid_wave_net.yaml
 ```
 
-### 3.3 监控
-*   **查看 TPU 占用**: `/home/creart/.local/bin/tpu-info`
-*   **查看日志**: 训练过程会实时打印 Loss 和 LR 更新信息。日志和 Checkpoint 保存在 `runs/grid_wave_mix_run/`。
+### 3.3 Monitoring
+*   **View TPU Usage**: `/home/creart/.local/bin/tpu-info`
+*   **View Logs**: Loss and LR update information are printed in real-time during training. Logs and Checkpoints are saved in `runs/grid_wave_mix_run/`.
 
-## 4. 故障排除
+## 4. Troubleshooting
 
-*   **Unsupported nprocs (4)**: 忽略此警告，脚本会自动适配为 8 卡 (v2/v3) 或单卡 (v6e-1)。
-*   **Processes Stuck**: 如果训练意外中断，部分后台进程可能残留，导致下一次无法启动。请运行 `killall python` 清理环境。
+*   **Unsupported nprocs (4)**: Ignore this warning; the script will automatically adapt to 8 cards (v2/v3) or single card (v6e-1).
+*   **Processes Stuck**: If training is interrupted unexpectedly, some background processes might remain, preventing the next start. Please run `killall python` to clean up the environment.
+
